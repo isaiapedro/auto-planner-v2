@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18-trixie
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: n8n
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./databases/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull llama3.2 && ollama pull nomic-embed-text && wait"]
+
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: postgres
+      DB_POSTGRESDB_PASSWORD: password
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+  pios_api:
+    build: ./tools/api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:password@postgres:5432/pios
+      OLLAMA_HOST: http://ollama:11434
+      EVIDENCE_VAULT_PATH: /evidence_vault
+      MASTER_WIKI_PATH: /master_wiki
+      GOOGLE_CREDENTIALS_PATH: /credentials/google_client_secret.json
+      GOOGLE_TOKEN_PATH: /credentials/google_token.json
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./evidence_vault:/evidence_vault
+      - ./master_wiki:/master_wiki
+      - ./credentials:/credentials
+      - whisper_cache:/root/.cache/huggingface
+
+volumes:
+  postgres_data:
+  ollama_data:
+  n8n_data:
+  whisper_cache:

@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "PIOS",
+    "slug": "pios",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "pios",
+    "plugins": [
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "PIOS needs microphone access to record audio memos.",
+          "enableBackgroundPlayback": false,
+          "enableBackgroundRecording": false
+        }
+      ],
+      "expo-asset",
+      "expo-sqlite"
+    ],
+    "ios": {
+      "bundleIdentifier": "com.pios.app",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "PIOS needs microphone access to record audio memos."
+      }
+    },
+    "android": {
+      "package": "com.pios.app",
+      "permissions": [
+        "RECORD_AUDIO",
+        "FOREGROUND_SERVICE",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
+    },
+    "extra": {
+      "eas": {
+        "projectId": "1ef2ac57-c7a9-41b4-bb6d-34d580f2118b"
+      }
+    },
+    "owner": "isaiapedros-team"
+  }
+}
