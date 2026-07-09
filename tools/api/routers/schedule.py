@@ -43,7 +43,7 @@ async def create_schedule(
         text(
             "INSERT INTO schedule_config (wake_time, sleep_time, buffer_minutes, domain_weights, fixed_blocks, calendar_event_ids) "
             "VALUES (:wake, :sleep, :buffer, CAST(:weights AS jsonb), CAST(:blocks AS jsonb), CAST(:event_ids AS jsonb)) "
-            "RETURNING id, wake_time, sleep_time, domain_weights, fixed_blocks, updated_at"
+            "RETURNING id, wake_time, sleep_time, buffer_minutes, domain_weights, fixed_blocks, calendar_event_ids, updated_at"
         ),
         {
             "wake": datetime.strptime(body.wake_time, "%H:%M").time(),
@@ -73,7 +73,6 @@ async def create_schedule(
 
     return _serialize_row(row)
 
-
 async def _allocate_exploration_blocks(
     schedule_id: str, wake_time: str, sleep_time: str, buffer_minutes: int, fixed_blocks
 ) -> None:
@@ -82,42 +81,44 @@ async def _allocate_exploration_blocks(
             text("SELECT title, kind::text, domain, target_date::text, cadence FROM goals WHERE status = 'active'")
         )
         goals = [dict(r._mapping) for r in goal_rows.fetchall()]
-        if not goals:
-            return
+    
+    if not goals:
+        return
 
+    try:
+        busy_windows = await asyncio.to_thread(calendar_svc.summarize_busy_windows, days_ahead=14)
+    except Exception:
+        logger.exception("Failed to summarize busy windows for exploration allocation")
+        busy_windows = []
+
+    slots = slots_svc.generate_weekly_slots(
+        wake_time, sleep_time, buffer_minutes, [b.model_dump() for b in fixed_blocks], busy_windows
+    )
+    if not slots:
+        return
+
+    assignments = slots_svc.assign_slots_to_goals(slots, goals)
+    slots_by_id = {s["id"]: s for s in slots}
+    new_event_ids = []
+    
+    for assignment in assignments:
+        slot = slots_by_id.get(assignment["slot_id"])
+        if slot is None:
+            continue
         try:
-            busy_windows = await asyncio.to_thread(calendar_svc.summarize_busy_windows, days_ahead=14)
+            event_id = await asyncio.to_thread(
+                calendar_svc.create_recurring_event,
+                assignment["goal_title"],
+                slot["start"],
+                [slot["weekday"]],
+                slot["duration_minutes"],
+            )
+            new_event_ids.append(event_id)
         except Exception:
-            logger.exception("Failed to summarize busy windows for exploration allocation")
-            busy_windows = []
+            logger.exception("Failed to create calendar event for slot assignment %r", assignment)
 
-        slots = slots_svc.generate_weekly_slots(
-            wake_time, sleep_time, buffer_minutes, [b.model_dump() for b in fixed_blocks], busy_windows
-        )
-        if not slots:
-            return
-
-        assignments = slots_svc.assign_slots_to_goals(slots, goals)
-
-        slots_by_id = {s["id"]: s for s in slots}
-        new_event_ids = []
-        for assignment in assignments:
-            slot = slots_by_id.get(assignment["slot_id"])
-            if slot is None:
-                continue
-            try:
-                event_id = await asyncio.to_thread(
-                    calendar_svc.create_recurring_event,
-                    assignment["goal_title"],
-                    slot["start"],
-                    [slot["weekday"]],
-                    slot["duration_minutes"],
-                )
-                new_event_ids.append(event_id)
-            except Exception:
-                logger.exception("Failed to create calendar event for slot assignment %r", assignment)
-
-        if new_event_ids:
+    if new_event_ids:
+        async with AsyncSessionLocal() as db:
             await db.execute(
                 text(
                     "UPDATE schedule_config "
@@ -128,16 +129,16 @@ async def _allocate_exploration_blocks(
             )
             await db.commit()
 
-
 @router.get("", response_model=ScheduleConfigResponse)
 async def get_schedule(db: AsyncSession = Depends(get_db)):
+    # FIX: Explicitly select buffer_minutes and calendar_event_ids
     result = await db.execute(
-        text("SELECT id, wake_time, sleep_time, domain_weights, fixed_blocks, updated_at "
+        text("SELECT id, wake_time, sleep_time, buffer_minutes, domain_weights, fixed_blocks, calendar_event_ids, updated_at "
              "FROM schedule_config ORDER BY updated_at DESC LIMIT 1")
     )
     row = result.fetchone()
     if not row:
-        raise HTTPException(status_code=404, detail="No schedule configured")
+        raise HTTPException(status_code=404, detail="No schedule configured!")
     return _serialize_row(row)
 
 

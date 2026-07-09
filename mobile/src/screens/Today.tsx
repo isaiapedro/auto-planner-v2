@@ -55,7 +55,29 @@ export default function Today() {
   }, []);
 
   // Reload whenever the tab regains focus (e.g. returning from RecordMemo)
-  useFocusEffect(useCallback(() => { checkSetup(); load(); }, [checkSetup, load]));
+  useFocusEffect(
+    useCallback(() => {
+      let isMounted = true;
+
+      async function initializeTodayScreen() {
+        try {
+          await checkSetup();
+        
+          if (isMounted) {
+            await load();
+          }
+        } catch (error) {
+          console.error("Failed to initialize Today screen:", error);
+        }
+      }
+
+      initializeTodayScreen();
+
+      return () => {
+        isMounted = false; // Prevents state updates if user navigates away mid-request
+      };
+    }, [checkSetup, load])
+  );
 
   // #11: open confirm modal when a notification is tapped
   useEffect(() => {

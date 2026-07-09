@@ -66,7 +66,9 @@ services:
       GOOGLE_TOKEN_PATH: /credentials/google_token.json
     ports:
       - "8000:8000"
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
+      - ./tools/api:/app
       - ./evidence_vault:/evidence_vault
       - ./master_wiki:/master_wiki
       - ./credentials:/credentials
