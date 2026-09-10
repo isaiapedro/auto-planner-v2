@@ -27,7 +27,31 @@ CREATE TABLE IF NOT EXISTS observations (
 
 CREATE INDEX IF NOT EXISTS idx_obs_captured ON observations (captured_at DESC);
 
--- ─── layer 2: interpretations + embeddings ────────────────────────────────────
+-- Durable worker queue for local-only voice transcription.  The audio path is
+-- Personal-domain data and is never exposed outside this database/API boundary.
+CREATE TABLE IF NOT EXISTS memo_jobs (
+    id              UUID PRIMARY KEY,
+    audio_path      TEXT NOT NULL UNIQUE,
+    event_title     TEXT,
+    status          TEXT NOT NULL CHECK (status IN ('queued', 'transcribing', 'done', 'error')),
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    error           TEXT,
+    transcript_path TEXT,
+    queued_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at      TIMESTAMPTZ,
+    completed_at    TIMESTAMPTZ,
+    available_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_memo_jobs_queue ON memo_jobs (status, queued_at);
+
+-- ─── legacy enrichment compatibility (read-only; no active writer) ─────────────
+--
+-- The memo pipeline deliberately stores only durable audio, an immutable
+-- transcript, and an observation pointer. These historical tables remain so
+-- existing Personal databases can be opened without destructive migration, but
+-- no current API path may write sentiment, embeddings, entities, or derived
+-- metrics to them. New review context reads observations and transcript files.
 
 CREATE TABLE IF NOT EXISTS interpretations (
     id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -83,6 +107,7 @@ CREATE TABLE IF NOT EXISTS events (
     id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     title           TEXT        NOT NULL,
     scheduled_at    TIMESTAMPTZ NOT NULL,
+    duration_minutes INTEGER    NOT NULL DEFAULT 60 CHECK (duration_minutes BETWEEN 5 AND 1440),
     status          status_t    NOT NULL DEFAULT 'pending',
     memo_id         UUID        REFERENCES observations(id),
     google_event_id TEXT,       -- linked Google Calendar event, for move/remove
@@ -91,6 +116,9 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_schedule ON events (scheduled_at, status);
+ALTER TABLE events ADD COLUMN IF NOT EXISTS routine_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_events_routine_key
+    ON events (routine_key) WHERE routine_key IS NOT NULL;
 
 -- ─── insights (LLM-generated) ─────────────────────────────────────────────────
 
@@ -107,20 +135,41 @@ CREATE TABLE IF NOT EXISTS insights (
 
 CREATE INDEX IF NOT EXISTS idx_insights_period ON insights (period_type, period_start DESC);
 
--- ─── schedule config ──────────────────────────────────────────────────────────
+-- Enrichment columns added for deterministic insight pipeline
+ALTER TABLE insights ADD COLUMN IF NOT EXISTS memo_refs          UUID[]  DEFAULT '{}';
+ALTER TABLE insights ADD COLUMN IF NOT EXISTS routine_adherence  JSONB   DEFAULT NULL;
+ALTER TABLE insights ADD COLUMN IF NOT EXISTS behavioral_context TEXT    DEFAULT NULL;
+ALTER TABLE insights ADD COLUMN IF NOT EXISTS inference_bundle   JSONB   DEFAULT NULL;
 
-CREATE TABLE IF NOT EXISTS schedule_config (
-    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    wake_time           TIME        NOT NULL,
-    sleep_time          TIME        NOT NULL,
-    buffer_minutes      INT         NOT NULL DEFAULT 60,     -- unscheduled off-time before sleep_time
-    domain_weights      JSONB       NOT NULL DEFAULT '{}',  -- deprecated, see goals table
-    fixed_blocks        JSONB       NOT NULL DEFAULT '[]',  -- [{title, days, start, duration_minutes}]
-    calendar_event_ids  JSONB       NOT NULL DEFAULT '[]',  -- Google event ids created for fixed_blocks + exploration slots
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+-- Immutable audit trail. A review may be regenerated, but every inference and
+-- validation result remains available for continuity and inspection.
+CREATE TABLE IF NOT EXISTS insight_inference_logs (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    insight_id      UUID        REFERENCES insights(id) ON DELETE SET NULL,
+    inference_type  TEXT        NOT NULL,
+    schema_version  TEXT        NOT NULL,
+    status          TEXT        NOT NULL CHECK (status IN ('valid', 'invalid', 'failed')),
+    input_hash      TEXT        NOT NULL,
+    input_snapshot  JSONB       NOT NULL DEFAULT '{}',
+    output          JSONB,
+    citation_paths  JSONB       NOT NULL DEFAULT '[]',
+    model           TEXT,
+    error_message   TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ─── goals (replaces domain_weights as the allocation driver) ────────────────
+-- `life_pillars` was added to the 1.2 Personal review contract after the
+-- initial audit table. Recreate the named check on every idempotent schema
+-- application so existing local volumes accept all contract sections too.
+ALTER TABLE insight_inference_logs
+    DROP CONSTRAINT IF EXISTS insight_inference_logs_inference_type_check;
+ALTER TABLE insight_inference_logs
+    ADD CONSTRAINT insight_inference_logs_inference_type_check
+    CHECK (inference_type IN ('routine', 'goals', 'future_plans', 'life_pillars'));
+
+CREATE INDEX IF NOT EXISTS idx_inference_logs_insight ON insight_inference_logs (insight_id, created_at DESC);
+
+-- ─── goals ────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS goals (
     id          UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -135,6 +184,21 @@ CREATE TABLE IF NOT EXISTS goals (
 );
 
 CREATE INDEX IF NOT EXISTS idx_goals_status ON goals (status);
+
+-- ─── planning runs (transactional weekly planning drafts) ─────────────────────
+
+CREATE TABLE IF NOT EXISTS planning_runs (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    week_start      DATE        NOT NULL,
+    week_end        DATE        NOT NULL,
+    status          TEXT        NOT NULL DEFAULT 'draft',
+    user_intention  TEXT        NOT NULL,
+    payload         JSONB       NOT NULL DEFAULT '{}',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_planning_runs_status ON planning_runs (status, created_at DESC);
 
 -- ─── analytics: metric registry + pre-computed values ────────────────────────
 

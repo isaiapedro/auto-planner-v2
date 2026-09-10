@@ -1,7 +1,7 @@
 /**
  * Task #8 — Audio recording screen (Pillar 1 — Capture).
  * Uses expo-audio useAudioRecorder + HIGH_QUALITY preset → .m4a.
- * On stop: save locally to SQLite sync_queue, upload, poll status.
+ * On stop: save locally to SQLite sync_queue, then upload for background transcription.
  */
 import {
   AudioModule,
@@ -21,21 +21,36 @@ import {
   View,
 } from "react-native";
 
-import { pollMemoStatus, uploadMemo } from "../api/client";
+import { confirmEvent, uploadMemo } from "../api/client";
 import { openDb, markMemoSynced, saveMemoLocal } from "../db/schema";
 
 type Props = {
-  route?: { params?: { eventTitle?: string } };
+  route?: { params?: { eventTitle?: string; eventId?: string } };
   navigation?: { goBack: () => void };
 };
 
+function newMemoId(): string {
+  // Expo/Hermes exposes Web Crypto on current SDKs. The fallback keeps the
+  // UUID-shaped client key usable on older Android runtimes.
+  const values = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(values);
+  } else {
+    for (let i = 0; i < values.length; i += 1) values[i] = Math.floor(Math.random() * 256);
+  }
+  values[6] = (values[6] & 0x0f) | 0x40;
+  values[8] = (values[8] & 0x3f) | 0x80;
+  const hex = Array.from(values, (v) => v.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export default function RecordMemo({ route, navigation }: Props) {
   const eventTitle = route?.params?.eventTitle;
+  const eventId = route?.params?.eventId;
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const state = useAudioRecorderState(recorder);
   const [title, setTitle] = useState(eventTitle ?? "");
-  const [phase, setPhase] = useState<"idle" | "recording" | "uploading" | "processing">("idle");
-  const [statusText, setStatusText] = useState("");
+  const [phase, setPhase] = useState<"idle" | "recording" | "uploading">("idle");
 
   useEffect(() => {
     (async () => {
@@ -63,33 +78,32 @@ export default function RecordMemo({ route, navigation }: Props) {
     }
 
     setPhase("uploading");
-    setStatusText("Uploading…");
     try {
       const db = await openDb();
-      const { job_id } = await uploadMemo(uri, title || undefined);
-      await saveMemoLocal(db, job_id, uri);
-
-      setPhase("processing");
-      const result = await pollMemoStatus(job_id);
-      if (result.status === "error") {
-        Alert.alert("Processing failed", result.error ?? "Unknown error");
-      } else {
-        await markMemoSynced(db, job_id);
-        Alert.alert("Memo saved", "Transcript and insights are ready.");
-        navigation?.goBack();
-      }
+      // Queue the local recording *before* the network request. A failed or
+      // slow long upload therefore leaves a recoverable local reference rather
+      // than making the recording disappear with the error dialog.
+      const memoId = newMemoId();
+      await saveMemoLocal(db, memoId, uri, eventId, eventTitle);
+      const { job_id } = await uploadMemo(uri, title || undefined, memoId);
+      // Today may already have marked the event complete before opening this
+      // recorder. This idempotent confirmation only attaches the durable memo;
+      // it does not create a second event or duplicate a completion action.
+      if (eventId) await confirmEvent(eventId, true, job_id);
+      await markMemoSynced(db, job_id);
+      Alert.alert("Memo saved", "Your recording is safely stored. The transcript will finish in the background.");
+      navigation?.goBack();
     } catch (e: any) {
-      Alert.alert("Error", e.message);
+      Alert.alert("Upload paused", `Your recording remains queued on this device. ${e.message}`);
     } finally {
       setPhase("idle");
-      setStatusText("");
     }
   };
 
   const secs = Math.floor((state.durationMillis ?? 0) / 1000);
   const mmss = `${String(Math.floor(secs / 60)).padStart(2, "0")}:${String(secs % 60).padStart(2, "0")}`;
 
-  const busy = phase === "uploading" || phase === "processing";
+  const busy = phase === "uploading";
 
   return (
     <View style={styles.container}>
@@ -110,7 +124,7 @@ export default function RecordMemo({ route, navigation }: Props) {
         <View style={styles.busy}>
           <ActivityIndicator size="large" color="#6366f1" />
           <Text style={styles.busyText}>
-            {phase === "uploading" ? "Uploading memo…" : "Transcribing + extracting insights…"}
+            Uploading memo…
           </Text>
         </View>
       ) : (

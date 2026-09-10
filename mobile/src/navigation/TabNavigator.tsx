@@ -2,8 +2,10 @@ import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import React from "react";
 import { Text } from "react-native";
 
-import Dashboard from "../screens/Dashboard";
 import Insights from "../screens/Insights";
+import Inbox from "../screens/Inbox";
+import Calendar from "../screens/Calendar";
+import Memos from "../screens/Memos";
 import Schedule from "../screens/Schedule";
 import Today from "../screens/Today";
 
@@ -16,10 +18,12 @@ const icon = (label: string) =>
 export default function TabNavigator() {
   return (
     <Tab.Navigator screenOptions={{ headerShown: true }}>
-      <Tab.Screen name="Today"     component={Today}     options={{ tabBarIcon: icon("📅") }} />
-      <Tab.Screen name="Dashboard" component={Dashboard} options={{ tabBarIcon: icon("📊") }} />
-      <Tab.Screen name="Insights"  component={Insights}  options={{ tabBarIcon: icon("🧠") }} />
-      <Tab.Screen name="Schedule"  component={Schedule}  options={{ tabBarIcon: icon("🗓️") }} />
+      <Tab.Screen name="Today" component={Today} options={{ tabBarIcon: icon("☀️") }} />
+      <Tab.Screen name="Memos" component={Memos} options={{ tabBarIcon: icon("🎙️") }} />
+      <Tab.Screen name="Calendar" component={Calendar} options={{ tabBarIcon: icon("🗓️") }} />
+      <Tab.Screen name="Plan" component={Schedule} options={{ title: "Plan", tabBarIcon: icon("✦") }} />
+      <Tab.Screen name="Inbox" component={Inbox} options={{ tabBarIcon: icon("✓") }} />
+      <Tab.Screen name="Insights" component={Insights} options={{ tabBarIcon: icon("🧠") }} />
     </Tab.Navigator>
   );
 }

@@ -1,49 +1,216 @@
+import mimetypes
+import logging
+import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, UploadFile
 
 from config import settings
-from schemas import MemoStatusResponse, MemoUploadResponse
-from services.pipeline import process_memo_pipeline
+from database import AsyncSessionLocal
+from schemas import MemoHistoryItem, MemoStatusResponse, MemoUploadResponse
+from sqlalchemy import text
 
 router = APIRouter(prefix="/memos", tags=["memos"])
+logger = logging.getLogger(__name__)
 
-# In-memory job registry — sufficient for v1 single-process deployment
-_job_status: dict[str, dict] = {}
+_AUDIO_SUFFIXES = {".m4a", ".wav", ".mp3", ".ogg", ".opus", ".aac", ".mp4", ".webm", ".3gp", ".amr", ".flac"}
+_MIME_SUFFIXES = {
+    "audio/mp4": ".m4a", "audio/mpeg": ".mp3", "audio/wav": ".wav",
+    "audio/x-wav": ".wav", "audio/ogg": ".ogg", "audio/opus": ".opus",
+    "audio/aac": ".aac", "audio/webm": ".webm", "audio/flac": ".flac",
+    "video/3gpp": ".3gp", "audio/3gpp": ".3gp",
+}
+
+
+def _read_transcript(path: str | None) -> str | None:
+    """Read only a transcript inside the configured Personal vault."""
+    if not path:
+        return None
+
+    try:
+        transcript_root = Path(settings.personal_transcripts_path).resolve()
+        transcript_path = Path(path).resolve()
+        if not transcript_path.is_relative_to(transcript_root):
+            logger.error("Refused memo transcript outside Personal transcript root")
+            return None
+        return transcript_path.read_text(encoding="utf-8")
+    except OSError:
+        logger.exception("Could not read memo transcript")
+        return None
+
+
+def _legacy_memo_items() -> list[MemoHistoryItem]:
+    """Expose migrated immutable records without importing them into the DB.
+
+    Historic records predate the durable job table.  They stay canonical in
+    `memos/records/`; only their original transcript section is returned.
+    """
+    records_dir = Path(settings.personal_memos_path) / "records"
+    try:
+        if not records_dir.is_dir() or not records_dir.resolve().is_relative_to(Path(settings.personal_memos_path).resolve()):
+            return []
+    except OSError:
+        return []
+
+    items: list[MemoHistoryItem] = []
+    for record in records_dir.glob("*.md"):
+        try:
+            content = record.read_text(encoding="utf-8")
+            obs_id = re.search(r"^obs_id:\s*([0-9a-f-]{36})\s*$", content, re.MULTILINE)
+            date_value = re.search(r"^date:\s*(\d{4}-\d{2}-\d{2})\s*$", content, re.MULTILINE)
+            if not obs_id or not date_value:
+                continue
+            event = re.search(r'^event:\s*"(.*)"\s*$', content, re.MULTILINE)
+            transcript = re.search(r"^## Transcript[^\n]*\n\n(.*?)(?=\n## |\Z)", content, re.MULTILINE | re.DOTALL)
+            items.append(MemoHistoryItem(
+                id=uuid.UUID(obs_id.group(1)),
+                status="done",
+                event_title=event.group(1) if event else None,
+                created_at=datetime.fromisoformat(date_value.group(1)).replace(tzinfo=timezone.utc),
+                transcript=transcript.group(1).strip() if transcript else None,
+            ))
+        except (OSError, ValueError):
+            logger.exception("Could not read migrated memo record")
+    return items
+
+
+def _audio_suffix(file: UploadFile) -> str:
+    """Choose a safe suffix without trusting an Android filename alone."""
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix in _AUDIO_SUFFIXES:
+        return suffix
+    content_type = (file.content_type or "").lower().split(";", 1)[0]
+    if content_type in _MIME_SUFFIXES:
+        return _MIME_SUFFIXES[content_type]
+    guessed, _ = mimetypes.guess_type(file.filename or "")
+    if guessed in _MIME_SUFFIXES:
+        return _MIME_SUFFIXES[guessed]
+    # Android/Expo sometimes reports application/octet-stream. ffmpeg (used by
+    # faster-whisper) identifies the container during transcription.
+    if content_type in {"", "application/octet-stream"}:
+        return ".audio"
+    raise HTTPException(status_code=400, detail="The upload is not recognised as audio")
 
 
 @router.post("/upload", response_model=MemoUploadResponse)
 async def upload_memo(
     file: UploadFile,
-    background_tasks: BackgroundTasks,
     event_title: str | None = None,
+    memo_id: str | None = None,
 ):
-    if not file.filename or not file.filename.endswith((".m4a", ".wav", ".mp3", ".ogg")):
-        raise HTTPException(status_code=400, detail="Unsupported audio format")
+    suffix = _audio_suffix(file)
+    if memo_id:
+        try:
+            obs_id = str(uuid.UUID(memo_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="memo_id must be a UUID") from exc
+    else:
+        obs_id = str(uuid.uuid4())
 
-    obs_id = str(uuid.uuid4())
-    # Audio is only needed transiently for transcription — only the transcript is
-    # kept permanently. process_memo_pipeline deletes this file once done.
-    tmp_dir = Path(settings.evidence_vault_path) / "tmp"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    suffix = Path(file.filename).suffix
-    dest = tmp_dir / f"{obs_id}{suffix}"
+    # Raw recordings are a primary Personal-domain record. Keep them in the
+    # mounted Personal vault before accepting the job; never make duration or
+    # later enrichment failures able to discard a recording.
+    audio_dir = Path(settings.personal_memos_path) / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    dest = audio_dir / f"{obs_id}{suffix}"
+    if dest.exists():
+        async with AsyncSessionLocal() as db:
+            row = await db.execute(
+                text("SELECT status FROM memo_jobs WHERE id = CAST(:id AS uuid)"), {"id": obs_id}
+            )
+            status = row.scalar_one_or_none()
+            if status:
+                return MemoUploadResponse(job_id=obs_id, status=status)
+            # An API/database interruption can happen after the atomic rename.
+            # Recover that durable Personal recording rather than rejecting it.
+            await db.execute(
+                text(
+                    "INSERT INTO memo_jobs (id, audio_path, event_title, status) "
+                    "VALUES (CAST(:id AS uuid), :audio_path, :event_title, 'queued')"
+                ),
+                {"id": obs_id, "audio_path": str(dest), "event_title": event_title},
+            )
+            await db.commit()
+        return MemoUploadResponse(job_id=obs_id)
+    partial = dest.with_suffix(dest.suffix + ".uploading")
 
-    async with aiofiles.open(dest, "wb") as f:
-        content = await file.read()
-        await f.write(content)
+    total = 0
+    try:
+        async with aiofiles.open(partial, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                total += len(chunk)
+                if total > settings.memo_max_upload_bytes:
+                    raise HTTPException(status_code=413, detail="Audio file exceeds the 512 MiB safety limit")
+                await f.write(chunk)
+        partial.replace(dest)
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
 
-    _job_status[obs_id] = {"status": "queued", "error": None}
-    background_tasks.add_task(process_memo_pipeline, obs_id, str(dest), _job_status, event_title)
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text(
+                "INSERT INTO memo_jobs (id, audio_path, event_title, status) "
+                "VALUES (CAST(:id AS uuid), :audio_path, :event_title, 'queued')"
+            ),
+            {"id": obs_id, "audio_path": str(dest), "event_title": event_title},
+        )
+        await db.commit()
 
     return MemoUploadResponse(job_id=obs_id)
 
 
+@router.get("", response_model=list[MemoHistoryItem])
+async def list_memos(limit: int = 50):
+    """Return recent transcript-only memo records, newest first.
+
+    Audio paths and internal worker diagnostics deliberately never leave the
+    Personal API. A completed transcript is read only from its configured
+    Personal-domain directory.
+    """
+    if not 1 <= limit <= 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            text(
+                "SELECT id, status, event_title, queued_at AS created_at, transcript_path, error "
+                "FROM memo_jobs ORDER BY queued_at DESC LIMIT :limit"
+            ),
+            {"limit": limit},
+        )
+        jobs = result.mappings().all()
+    current_items = [
+        MemoHistoryItem(
+            id=job["id"],
+            status=job["status"],
+            event_title=job["event_title"],
+            created_at=job["created_at"],
+            transcript=_read_transcript(job["transcript_path"]) if job["status"] == "done" else None,
+            error="Transcription could not be completed. Please retry later."
+            if job["status"] == "error" else None,
+        )
+        for job in jobs
+    ]
+    current_ids = {item.id for item in current_items}
+    merged = current_items + [item for item in _legacy_memo_items() if item.id not in current_ids]
+    return sorted(merged, key=lambda item: item.created_at, reverse=True)[:limit]
+
+
 @router.get("/{job_id}/status", response_model=MemoStatusResponse)
 async def get_memo_status(job_id: str):
-    job = _job_status.get(job_id)
-    if not job:
+    async with AsyncSessionLocal() as db:
+        row = await db.execute(
+            text("SELECT status, error FROM memo_jobs WHERE id = CAST(:id AS uuid)"), {"id": job_id}
+        )
+        job = row.mappings().first()
+    if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return MemoStatusResponse(job_id=job_id, **job)
+    return MemoStatusResponse(
+        job_id=job_id,
+        status=job["status"],
+        error="Transcription could not be completed. Please retry later."
+        if job["status"] == "error" else None,
+    )

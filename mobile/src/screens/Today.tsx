@@ -1,167 +1,40 @@
-/**
- * Pillar 1: Capture — event list + confirm flow + free-form memo button.
- * Wires tasks #7 (confirm modal), #8 (record nav), #11 (notifications), #12 (sync).
- */
+/** Live day view: events become a readable focus sequence, not a plain queue. */
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import React, { useCallback, useEffect, useState } from "react";
-import {
-  ActivityIndicator,
-  FlatList,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 
-import { confirmEvent, getSchedule, syncPull } from "../api/client";
+import { confirmEvent, syncPull } from "../api/client";
 import ConfirmEventModal from "../components/ConfirmEventModal";
+import { EmptyState, Screen, StatusPill } from "../components/ui";
 import { openDb, upsertEvents } from "../db/schema";
 import type { RootStackParams } from "../navigation/RootNavigator";
 import { onNotificationResponse, scheduleEventNotifications } from "../notifications";
-import ScheduleWizard from "./ScheduleWizard";
 import type { AppEvent } from "../types";
+import { colors } from "../theme";
+
+const t = colors;
+const dayName = new Intl.DateTimeFormat(undefined, { weekday: "long" });
+const time = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+
+function eventTone(status: AppEvent["status"]) { return status === "confirmed" ? [t.success, t.successSoft] : status === "skipped" ? [t.warning, t.warningSoft] : [t.primary, t.primarySoft]; }
 
 export default function Today() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParams>>();
-  const [events, setEvents] = useState<AppEvent[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<AppEvent | null>(null);
-  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
-
-  const checkSetup = useCallback(async () => {
-    try {
-      await getSchedule();
-      setNeedsSetup(false);
-    } catch {
-      // No schedule configured yet (404) — show the first-launch wizard inline.
-      setNeedsSetup(true);
-    }
-  }, []);
-
-  const load = useCallback(async () => {
-    try {
-      const { events: evts } = await syncPull();
-      setEvents(evts);
-      // #12: mirror to local SQLite; #11: (re)schedule notifications
-      const db = await openDb();
-      await upsertEvents(db, evts);
-      await scheduleEventNotifications(evts);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // Reload whenever the tab regains focus (e.g. returning from RecordMemo)
-  useFocusEffect(
-    useCallback(() => {
-      let isMounted = true;
-
-      async function initializeTodayScreen() {
-        try {
-          await checkSetup();
-        
-          if (isMounted) {
-            await load();
-          }
-        } catch (error) {
-          console.error("Failed to initialize Today screen:", error);
-        }
-      }
-
-      initializeTodayScreen();
-
-      return () => {
-        isMounted = false; // Prevents state updates if user navigates away mid-request
-      };
-    }, [checkSetup, load])
-  );
-
-  // #11: open confirm modal when a notification is tapped
-  useEffect(() => {
-    const sub = onNotificationResponse((eventId) => {
-      const evt = events.find((e) => e.id === eventId);
-      if (evt) setSelected(evt);
-    });
-    return () => sub.remove();
-  }, [events]);
-
-  const handleSkip = async (event: AppEvent) => {
-    setSelected(null);
-    await confirmEvent(event.id, false);
-    load();
-  };
-
-  const handleConfirmNoMemo = async (event: AppEvent) => {
-    setSelected(null);
-    await confirmEvent(event.id, true);
-    load();
-  };
-
-  const handleConfirmWithMemo = async (event: AppEvent) => {
-    setSelected(null);
-    await confirmEvent(event.id, true);
-    navigation.navigate("RecordMemo", { eventTitle: event.title, eventId: event.id });
-  };
-
-  if (loading || needsSetup === null) return <ActivityIndicator style={styles.center} />;
-
-  if (needsSetup) {
-    return <ScheduleWizard onDone={() => setNeedsSetup(false)} />;
-  }
-
-  return (
-    <View style={styles.container}>
-      <FlatList
-        data={events}
-        keyExtractor={(e) => e.id}
-        renderItem={({ item }) => (
-          <View style={styles.card}>
-            <Text style={styles.title}>{item.title}</Text>
-            <Text style={styles.time}>
-              {new Date(item.scheduled_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-            </Text>
-            {item.status === "pending" ? (
-              <Pressable style={styles.checkBtn} onPress={() => setSelected(item)}>
-                <Text style={styles.checkText}>Check in</Text>
-              </Pressable>
-            ) : (
-              <Text style={styles.status}>{item.status}</Text>
-            )}
-          </View>
-        )}
-        ListEmptyComponent={<Text style={styles.empty}>No events today</Text>}
-      />
-
-      <Pressable style={styles.fab} onPress={() => navigation.navigate("RecordMemo")}>
-        <Text style={styles.fabText}>+ Memo</Text>
-      </Pressable>
-
-      <ConfirmEventModal
-        event={selected}
-        onClose={() => setSelected(null)}
-        onSkip={handleSkip}
-        onConfirmNoMemo={handleConfirmNoMemo}
-        onConfirmWithMemo={handleConfirmWithMemo}
-      />
-    </View>
-  );
+  const [events, setEvents] = useState<AppEvent[]>([]); const [loading, setLoading] = useState(true); const [selected, setSelected] = useState<AppEvent | null>(null);
+  const load = useCallback(async () => { setLoading(true); try { const { events: loaded } = await syncPull(); setEvents(loaded.sort((a, b) => a.scheduled_at.localeCompare(b.scheduled_at))); const db = await openDb(); await upsertEvents(db, loaded); await scheduleEventNotifications(loaded); } catch (error) { console.error(error); } finally { setLoading(false); } }, []);
+  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useEffect(() => { const sub = onNotificationResponse((id) => { const event = events.find((item) => item.id === id); if (event) setSelected(event); }); return () => sub.remove(); }, [events]);
+  const today = useMemo(() => { const key = new Date().toDateString(); return events.filter((event) => new Date(event.scheduled_at).toDateString() === key); }, [events]);
+  const pending = today.filter((event) => event.status === "pending"); const done = today.filter((event) => event.status === "confirmed"); const next = pending[0];
+  const handleSkip = async (event: AppEvent) => { setSelected(null); await confirmEvent(event.id, false); load(); };
+  const handleConfirm = async (event: AppEvent, memo = false) => { setSelected(null); await confirmEvent(event.id, true); if (memo) navigation.navigate("RecordMemo", { eventTitle: event.title, eventId: event.id }); load(); };
+  if (loading) return <Screen style={s.state}><ActivityIndicator color={t.primary} /><Text style={s.stateText}>Preparing your day…</Text></Screen>;
+  return <Screen><FlatList data={today} keyExtractor={(event) => event.id} contentContainerStyle={s.content} showsVerticalScrollIndicator={false} ListHeaderComponent={<><View style={s.hero}><Text style={s.eyebrow}>TODAY · {dayName.format(new Date()).toUpperCase()}</Text><Text style={s.heroTitle}>{next ? "Your next moment" : done.length ? "Your day is complete" : "A day with room"}</Text><Text style={s.heroBody}>{next ? `${next.title} starts at ${time.format(new Date(next.scheduled_at))}.` : done.length ? `${done.length} planned moments confirmed.` : "Nothing is scheduled in Today yet."}</Text><View style={s.stats}><View><Text style={s.statValue}>{pending.length}</Text><Text style={s.statLabel}>to do</Text></View><View style={s.statDivider} /><View><Text style={s.statValue}>{done.length}</Text><Text style={s.statLabel}>done</Text></View></View></View><Text style={s.sectionTitle}>{today.length ? "Your timeline" : "Your timeline is open"}</Text></>} renderItem={({ item, index }) => { const [color] = eventTone(item.status); const active = item.status === "pending"; const statusTone = item.status === "confirmed" ? "success" : item.status === "skipped" ? "warning" : "info"; return <View style={s.eventWrap}><View style={s.rail}><View style={[s.railDot, { backgroundColor: color }]} />{index < today.length - 1 && <View style={s.railLine} />}</View><Pressable accessibilityRole={active ? "button" : "text"} accessibilityLabel={`${item.title}, ${item.status}, ${time.format(new Date(item.scheduled_at))}`} style={s.event} onPress={() => active && setSelected(item)} disabled={!active}><View style={s.eventTop}><Text style={[s.eventTime, { color }]}>{time.format(new Date(item.scheduled_at))}</Text><StatusPill label={item.status} tone={statusTone} /></View><Text style={s.eventTitle}>{item.title}</Text>{active && <Text style={s.eventHint}>Tap to check in or add a reflection</Text>}</Pressable></View>; }} ListEmptyComponent={<EmptyState title="Nothing has reached Today" body="Open Schedule to review the routine, then show its existing events here." action={<Pressable accessibilityRole="button" accessibilityLabel="Review weekly routine" style={s.emptyAction} onPress={() => navigation.navigate("RoutineWeek")}><Text style={s.emptyActionText}>Review routine</Text></Pressable>} />} ListFooterComponent={<Pressable accessibilityRole="button" accessibilityLabel="Capture a memo" style={s.memoButton} onPress={() => navigation.navigate("RecordMemo")}><Text style={s.memoIcon}>+</Text><View><Text style={s.memoTitle}>Capture a memo</Text><Text style={s.memoText}>Keep a moment for the next review.</Text></View></Pressable>} />
+    <ConfirmEventModal event={selected} onClose={() => setSelected(null)} onSkip={handleSkip} onConfirmNoMemo={(event) => handleConfirm(event)} onConfirmWithMemo={(event) => handleConfirm(event, true)} />
+  </Screen>;
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f5f5f5" },
-  center:    { flex: 1, justifyContent: "center" },
-  card:      { backgroundColor: "#fff", margin: 8, padding: 16, borderRadius: 12 },
-  title:     { fontSize: 16, fontWeight: "600" },
-  time:      { fontSize: 13, color: "#888", marginTop: 4 },
-  checkBtn:  { marginTop: 12, backgroundColor: "#6366f1", paddingVertical: 10,
-               borderRadius: 8, alignItems: "center" },
-  checkText: { color: "#fff", fontWeight: "600" },
-  status:    { marginTop: 8, color: "#888", textTransform: "capitalize" },
-  empty:     { textAlign: "center", marginTop: 40, color: "#aaa" },
-  fab:       { position: "absolute", bottom: 24, right: 24, backgroundColor: "#6366f1",
-               paddingHorizontal: 20, paddingVertical: 14, borderRadius: 28 },
-  fabText:   { color: "#fff", fontWeight: "700", fontSize: 16 },
+const s = StyleSheet.create({
+  content: { padding: 16, paddingBottom: 34, gap: 10 }, state: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12 }, stateText: { color: t.muted }, hero: { backgroundColor: t.inverseSurface, padding: 22, borderRadius: 24, gap: 9, marginBottom: 12 }, eyebrow: { color: t.inverseMuted, fontSize: 10, fontWeight: "800", letterSpacing: 1.2 }, heroTitle: { color: t.inverse, fontSize: 28, fontWeight: "800", letterSpacing: -0.6 }, heroBody: { color: t.inverse, fontSize: 14, lineHeight: 20, opacity: 0.84 }, stats: { flexDirection: "row", alignItems: "center", gap: 18, marginTop: 8 }, statValue: { color: t.inverse, fontWeight: "800", fontSize: 23, fontVariant: ["tabular-nums"] }, statLabel: { color: t.inverseMuted, fontSize: 11, textTransform: "uppercase", letterSpacing: .7 }, statDivider: { width: 1, height: 30, backgroundColor: t.inverseBorder }, sectionTitle: { color: t.ink, fontSize: 20, fontWeight: "800", marginBottom: 4 }, eventWrap: { flexDirection: "row", minHeight: 94 }, rail: { width: 28, alignItems: "center" }, railDot: { width: 10, height: 10, borderRadius: 5, marginTop: 20 }, railLine: { width: 2, flex: 1, backgroundColor: t.border }, event: { flex: 1, backgroundColor: t.surface, borderRadius: 16, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: t.border, gap: 5 }, eventTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, eventTime: { fontSize: 12, fontWeight: "800", fontVariant: ["tabular-nums"] }, eventTitle: { color: t.ink, fontSize: 16, fontWeight: "800" }, eventHint: { color: t.muted, fontSize: 12 }, emptyAction: { backgroundColor: t.primarySoft, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 9, marginTop: 4 }, emptyActionText: { color: t.primary, fontWeight: "800", fontSize: 13 }, memoButton: { backgroundColor: t.successSoft, borderRadius: 18, padding: 16, flexDirection: "row", alignItems: "center", gap: 12, marginTop: 10 }, memoIcon: { backgroundColor: t.success, color: t.inverse, width: 30, height: 30, borderRadius: 15, textAlign: "center", textAlignVertical: "center", fontSize: 20 }, memoTitle: { color: t.success, fontWeight: "800" }, memoText: { color: t.successText, fontSize: 12, marginTop: 2 },
 });

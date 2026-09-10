@@ -6,6 +6,7 @@
  */
 import * as Notifications from "expo-notifications";
 
+import { openDb } from "../db/schema";
 import type { AppEvent } from "../types";
 
 Notifications.setNotificationHandler({
@@ -24,18 +25,42 @@ export async function requestPermissions(): Promise<boolean> {
 }
 
 /**
- * Schedule confirmation prompts for all pending future events.
- * Cancels existing scheduled notifications first to avoid duplicates.
+ * Reconcile confirmation prompts with the current event list. Notification ids are
+ * persisted locally, so unrelated notifications (including those from other apps)
+ * are never cancelled and unchanged event reminders are not needlessly recreated.
  */
 export async function scheduleEventNotifications(events: AppEvent[]): Promise<void> {
-  await Notifications.cancelAllScheduledNotificationsAsync();
-
   const now = Date.now();
-  for (const event of events) {
-    const fireAt = new Date(event.scheduled_at).getTime();
-    if (event.status !== "pending" || fireAt <= now) continue;
+  const desired = new Map(
+    events
+      .filter((event) => event.status === "pending" && new Date(event.scheduled_at).getTime() > now)
+      .map((event) => [event.id, event])
+  );
+  const db = await openDb();
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS event_notifications (
+      event_id TEXT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+      notification_id TEXT NOT NULL,
+      scheduled_at TEXT NOT NULL
+    );
+  `);
+  const existing = await db.getAllAsync<{ event_id: string; notification_id: string; scheduled_at: string }>(
+    "SELECT event_id, notification_id, scheduled_at FROM event_notifications"
+  );
 
-    await Notifications.scheduleNotificationAsync({
+  for (const notification of existing) {
+    const event = desired.get(notification.event_id);
+    if (event && event.scheduled_at === notification.scheduled_at) {
+      desired.delete(notification.event_id);
+      continue;
+    }
+    await Notifications.cancelScheduledNotificationAsync(notification.notification_id).catch(() => undefined);
+    await db.runAsync("DELETE FROM event_notifications WHERE event_id = ?", [notification.event_id]);
+  }
+
+  for (const event of desired.values()) {
+    const fireAt = new Date(event.scheduled_at).getTime();
+    const notificationId = await Notifications.scheduleNotificationAsync({
       content: {
         title: "Event check-in",
         body: `Did “${event.title}” happen?`,
@@ -46,6 +71,14 @@ export async function scheduleEventNotifications(events: AppEvent[]): Promise<vo
         date: new Date(fireAt),
       },
     });
+    await db.runAsync(
+      `INSERT INTO event_notifications (event_id, notification_id, scheduled_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(event_id) DO UPDATE SET
+         notification_id = excluded.notification_id,
+         scheduled_at = excluded.scheduled_at`,
+      [event.id, notificationId, event.scheduled_at]
+    );
   }
 }
 
@@ -57,46 +90,5 @@ export function onNotificationResponse(handler: (eventId: string) => void) {
   return Notifications.addNotificationResponseReceivedListener((response) => {
     const eventId = response.notification.request.content.data?.event_id;
     if (typeof eventId === "string") handler(eventId);
-  });
-}
-
-const WEEKLY_REVIEW_ID = "review-reminder-weekly";
-const MONTHLY_REVIEW_ID = "review-reminder-monthly";
-
-/**
- * Recurring local reminders to generate the weekly/monthly review
- * (generation itself stays a manual paste-into-Claude-Code step).
- * Fixed identifiers make re-scheduling idempotent — safe to call on every app start.
- */
-export async function scheduleReviewReminders(): Promise<void> {
-  await Notifications.scheduleNotificationAsync({
-    identifier: WEEKLY_REVIEW_ID,
-    content: {
-      title: "Weekly review time",
-      body: "Generate this week's review (GET /insights/weekly/context → paste into Claude Code).",
-      data: { review_period: "weekly" },
-    },
-    trigger: {
-      type: Notifications.SchedulableTriggerInputTypes.WEEKLY,
-      weekday: 6, // Friday (1 = Sunday ... 7 = Saturday)
-      hour: 12,
-      minute: 0,
-    },
-  });
-
-  await Notifications.scheduleNotificationAsync({
-    identifier: MONTHLY_REVIEW_ID,
-    content: {
-      title: "Monthly review time",
-      body: "Generate this month's review (GET /insights/monthly/context → paste into Claude Code).",
-      data: { review_period: "monthly" },
-    },
-    trigger: {
-      type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
-      day: 1,
-      hour: 12,
-      minute: 0,
-      repeats: true,
-    },
   });
 }

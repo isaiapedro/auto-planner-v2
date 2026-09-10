@@ -3,13 +3,15 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import React from "react";
 
 import RecordMemo from "../screens/RecordMemo";
-import ScheduleWizard from "../screens/ScheduleWizard";
+import RoutineWeekScreen from "../screens/RoutineWeekScreen";
+import AddCalendarBlock from "../screens/AddCalendarBlock";
 import TabNavigator from "./TabNavigator";
 
 export type RootStackParams = {
   Tabs: undefined;
   RecordMemo: { eventTitle?: string; eventId?: string } | undefined;
-  ScheduleWizard: undefined;
+  AddCalendarBlock: undefined;
+  RoutineWeek: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParams>();
@@ -25,9 +27,14 @@ export default function RootNavigator() {
           options={{ presentation: "modal", title: "Record Memo" }}
         />
         <Stack.Screen
-          name="ScheduleWizard"
-          component={ScheduleWizard}
-          options={{ presentation: "modal", title: "Set Up Schedule" }}
+          name="RoutineWeek"
+          component={RoutineWeekScreen}
+          options={{ presentation: "modal", title: "Weekly Routine" }}
+        />
+        <Stack.Screen
+          name="AddCalendarBlock"
+          component={AddCalendarBlock}
+          options={{ presentation: "modal", title: "Add calendar block" }}
         />
       </Stack.Navigator>
     </NavigationContainer>

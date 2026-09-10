@@ -15,12 +15,24 @@
         }
       ],
       "expo-asset",
-      "expo-sqlite"
+      "expo-sqlite",
+      "expo-status-bar",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
     ],
     "ios": {
       "bundleIdentifier": "com.pios.app",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "PIOS needs microphone access to record audio memos."
+        "NSMicrophoneUsageDescription": "PIOS needs microphone access to record audio memos.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
       }
     },
     "android": {

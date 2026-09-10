@@ -16,9 +16,10 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-ROOT = Path(__file__).resolve().parents[3]
-CLIENT_SECRET_PATH = ROOT / "credentials" / "google_client_secret.json"
-TOKEN_PATH = ROOT / "credentials" / "google_token.json"
+PLANNER_ROOT = Path(__file__).resolve().parents[3]
+CREDENTIALS_DIR = PLANNER_ROOT / "environment" / "credentials"
+CLIENT_SECRET_PATH = CREDENTIALS_DIR / "google_client_secret.json"
+TOKEN_PATH = CREDENTIALS_DIR / "google_token.json"
 
 
 def main() -> None:

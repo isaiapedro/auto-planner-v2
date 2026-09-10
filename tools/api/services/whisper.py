@@ -19,7 +19,8 @@ def get_model() -> WhisperModel:
     return _model
 
 
-async def transcribe(audio_path: str) -> str:
+def transcribe_sync(audio_path: str) -> str:
+    """Run blocking model inference outside the API event loop."""
     model = get_model()
-    segments, _ = model.transcribe(audio_path, vad_filter=True, beam_size=5)
+    segments, _ = model.transcribe(audio_path, vad_filter=True, beam_size=1)
     return " ".join(s.text.strip() for s in segments)

@@ -142,6 +142,7 @@ def create_event(
     start_iso: str,
     duration_minutes: int,
     calendar_id: str = DEFAULT_CALENDAR_ID,
+    description: str | None = None,
 ) -> str:
     """Create a single (non-recurring) event — used for insight-recommended add blocks."""
     creds = _load_credentials()
@@ -155,6 +156,8 @@ def create_event(
         "start": {"dateTime": start_dt.isoformat(), "timeZone": "America/Sao_Paulo"},
         "end": {"dateTime": end_dt.isoformat(), "timeZone": "America/Sao_Paulo"},
     }
+    if description:
+        body["description"] = description
     created = service.events().insert(calendarId=calendar_id, body=body).execute()
     return created["id"]
 

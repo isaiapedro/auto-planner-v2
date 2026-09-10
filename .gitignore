@@ -1,0 +1,8 @@
+# Local Planner runtime and credential material must never be committed.
+credentials/
+tools/api/.env
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+mobile/node_modules/
+mobile/.expo/

@@ -1,174 +1,125 @@
-"""Full memo processing pipeline — replaces stub in routers/memos.py."""
+"""Durable, transcript-only memo worker.
+
+The HTTP request only stores audio and enqueues a database job.  This worker is
+the sole place that runs Whisper, so model inference never blocks API requests.
+"""
 from __future__ import annotations
 
+import asyncio
 import json
-import uuid
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiofiles
 
 from config import settings
-from database import AsyncSessionLocal
-from schemas import MemoFeatures
-from services import ollama as ollama_svc
-from services import vault as vault_svc
+from database import AsyncSessionLocal, ensure_memo_jobs_schema
 from services import whisper as whisper_svc
-
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
 
 
 async def process_memo_pipeline(
     obs_id: str,
     audio_path: str,
-    job_registry: dict[str, dict],
     event_title: str | None = None,
 ) -> None:
-    """
-    Full async pipeline:
-      audio → STT → feature extraction → embedding → PostgreSQL → Obsidian → metrics
-    Updates job_registry[obs_id] at each step for status polling.
-    """
+    """Create immutable transcript and observation records for a claimed job."""
     try:
-        # ── 1. transcribe ──────────────────────────────────────────────────────
-        job_registry[obs_id] = {"status": "transcribing", "error": None}
-        try:
-            transcript = await whisper_svc.transcribe(audio_path)
-        finally:
-            # Audio is transient — only the transcript is kept permanently.
-            Path(audio_path).unlink(missing_ok=True)
+        transcript = await asyncio.to_thread(whisper_svc.transcribe_sync, audio_path)
 
-        transcript_dir = Path(settings.evidence_vault_path) / "transcripts"
+        recorded_at = datetime.now(timezone.utc)
+        transcript_dir = Path(settings.personal_transcripts_path)
         transcript_dir.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(transcript_dir / f"{obs_id}.txt", "w") as f:
-            await f.write(transcript)
+        transcript_filename = f"{recorded_at.strftime('%Y-%m-%dT%H-%M-%S')}_{obs_id}.txt"
+        transcript_header = f"# recorded_at: {recorded_at.isoformat()}\n\n"
+        transcript_path = transcript_dir / transcript_filename
+        partial_path = transcript_path.with_suffix(".txt.writing")
+        async with aiofiles.open(partial_path, "w", encoding="utf-8") as f:
+            await f.write(transcript_header + transcript)
+        partial_path.replace(transcript_path)
 
-        # ── 2. extract features (Ollama structured output) ─────────────────────
-        job_registry[obs_id]["status"] = "extracting"
-        features: MemoFeatures = await ollama_svc.extract_features(transcript)
-
-        # ── 3. generate embedding (Ollama nomic-embed-text) ────────────────────
-        job_registry[obs_id]["status"] = "embedding"
-        embedding: list[float] = await ollama_svc.embed(transcript)
-        embedding_str = "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
-
-        # ── 4. persist to PostgreSQL ───────────────────────────────────────────
+        # The observation is intentionally transcript-only: no sentiment,
+        # embedding, entity extraction, vault annotation, or metrics are run.
         async with AsyncSessionLocal() as db:
-            # observations row — audio itself was deleted after transcription;
-            # only the transcript file is kept (see payload.transcript_path).
             await db.execute(
                 text(
                     "INSERT INTO observations (id, source_type, file_path, payload) "
-                    "VALUES (CAST(:id AS uuid), 'audio', NULL, CAST(:payload AS jsonb)) "
+                    "VALUES (CAST(:id AS uuid), 'audio', :file_path, CAST(:payload AS jsonb)) "
                     "ON CONFLICT (id) DO NOTHING"
+                ),
+                {"id": obs_id, "file_path": audio_path, "payload": json.dumps({
+                    "transcript_path": str(transcript_path),
+                    "recorded_at": recorded_at.isoformat(), "event_title": event_title,
+                })},
+            )
+            await db.execute(
+                text(
+                    "UPDATE memo_jobs SET status = 'done', transcript_path = :transcript_path, "
+                    "error = NULL, completed_at = NOW(), updated_at = NOW() "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"id": obs_id, "transcript_path": str(transcript_path)},
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.exception("Memo transcription failed for job %s", obs_id)
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                text(
+                    "UPDATE memo_jobs SET "
+                    "status = CASE WHEN attempts >= :max_attempts THEN 'error' ELSE 'queued' END, "
+                    "error = :error, available_at = NOW() + (:retry_seconds * INTERVAL '1 second'), "
+                    "updated_at = NOW() "
+                    "WHERE id = CAST(:id AS uuid)"
                 ),
                 {
                     "id": obs_id,
-                    "payload": json.dumps(
-                        {"transcript_path": str(transcript_dir / f"{obs_id}.txt"),
-                         "event_title": event_title}
-                    ),
+                    "error": str(exc)[:2000],
+                    "max_attempts": settings.memo_worker_max_attempts,
+                    "retry_seconds": settings.memo_worker_retry_seconds,
                 },
             )
-
-            # interpretations row
-            interp_id = str(uuid.uuid4())
-            await db.execute(
-                text(
-                    "INSERT INTO interpretations "
-                    "(id, obs_id, transcript, embedding, mood, energy, "
-                    " topics, sentiment, key_takeaways) "
-                    "VALUES (CAST(:id AS uuid), CAST(:obs_id AS uuid), :transcript, "
-                    "        CAST(:embedding AS vector), :mood, :energy, "
-                    "        :topics, CAST(:sentiment AS sentiment_t), :takeaways)"
-                ),
-                {
-                    "id": interp_id,
-                    "obs_id": obs_id,
-                    "transcript": transcript,
-                    "embedding": embedding_str,
-                    "mood": features.mood,
-                    "energy": features.energy,
-                    "topics": features.topics,
-                    "sentiment": features.sentiment.value,
-                    "takeaways": features.key_takeaways,
-                },
-            )
-
-            # graph entities + evidence_store
-            for entity in features.entities:
-                ent_result = await db.execute(
-                    text(
-                        "INSERT INTO graph_entities (name, category) "
-                        "VALUES (:name, CAST(:cat AS entity_cat)) "
-                        "ON CONFLICT (name, category) "
-                        "DO UPDATE SET name = EXCLUDED.name "
-                        "RETURNING id"
-                    ),
-                    {"name": entity.name, "cat": entity.type},
-                )
-                entity_id = str(ent_result.fetchone()[0])
-
-                await db.execute(
-                    text(
-                        "INSERT INTO evidence_store (entity_id, obs_id, interp_id) "
-                        "VALUES (CAST(:eid AS uuid), CAST(:oid AS uuid), CAST(:iid AS uuid))"
-                    ),
-                    {"eid": entity_id, "oid": obs_id, "iid": interp_id},
-                )
-
             await db.commit()
 
-        # ── 5. write Obsidian vault ────────────────────────────────────────────
-        await vault_svc.write_memo(obs_id, event_title, transcript, features)
 
-        # ── 6. recompute dashboard metrics ────────────────────────────────────
-        await _recompute_metrics()
-
-        job_registry[obs_id] = {"status": "done", "error": None}
-
-    except Exception as exc:
-        job_registry[obs_id] = {"status": "error", "error": str(exc)}
-        raise
-
-
-async def _recompute_metrics() -> None:
-    """Execute all metric_registry SQL definitions and upsert into dashboard_metrics."""
+async def _claim_next_memo_job() -> dict | None:
     async with AsyncSessionLocal() as db:
-        rows = await db.execute(
-            text("SELECT metric_id, sql_definition, visualization_type FROM metric_registry")
+        row = await db.execute(
+            text(
+                "SELECT id::text, audio_path, event_title FROM memo_jobs "
+                "WHERE status = 'queued' AND available_at <= NOW() ORDER BY queued_at "
+                "FOR UPDATE SKIP LOCKED LIMIT 1"
+            )
         )
-        metrics = rows.fetchall()
-
-        for m in metrics:
-            try:
-                value_row = await db.execute(text(m.sql_definition))
-                raw = value_row.fetchone()
-                if raw is None:
-                    continue
-
-                scalar = raw[0]
-                # Non-numeric metrics (topic_frequency, sentiment_distribution) return JSON text
-                if isinstance(scalar, str) and (scalar.startswith("{") or scalar.startswith("[")):
-                    metric_value = 0.0
-                    metadata = {"data": scalar}
-                else:
-                    metric_value = float(scalar) if scalar is not None else 0.0
-                    metadata = {}
-
-                await db.execute(
-                    text(
-                        "INSERT INTO dashboard_metrics "
-                        "(metric_id, computed_for_date, metric_value, metadata) "
-                        "VALUES (:mid, CURRENT_DATE, :val, CAST(:meta AS jsonb)) "
-                        "ON CONFLICT (metric_id, computed_for_date) "
-                        "DO UPDATE SET metric_value = EXCLUDED.metric_value, "
-                        "             metadata = EXCLUDED.metadata, "
-                        "             computed_at = NOW()"
-                    ),
-                    {"mid": m.metric_id, "val": metric_value, "meta": json.dumps(metadata)},
-                )
-            except Exception:
-                # Don't let one bad metric kill the whole recompute
-                continue
-
+        job = row.mappings().first()
+        if job is None:
+            return None
+        await db.execute(
+            text(
+                "UPDATE memo_jobs SET status = 'transcribing', attempts = attempts + 1, "
+                "started_at = NOW(), updated_at = NOW() WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": job["id"]},
+        )
         await db.commit()
+        return dict(job)
+
+
+async def run_memo_worker() -> None:
+    """Process one job at a time; recover interrupted jobs on every API start."""
+    await ensure_memo_jobs_schema()
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text("UPDATE memo_jobs SET status = 'queued', updated_at = NOW() WHERE status = 'transcribing'")
+        )
+        await db.commit()
+
+    while True:
+        job = await _claim_next_memo_job()
+        if job is None:
+            await asyncio.sleep(settings.memo_worker_poll_seconds)
+            continue
+        await process_memo_pipeline(job["id"], job["audio_path"], job["event_title"])
