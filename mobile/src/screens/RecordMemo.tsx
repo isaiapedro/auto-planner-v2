@@ -23,6 +23,7 @@ import {
 
 import { confirmEvent, uploadMemo } from "../api/client";
 import { openDb, markMemoSynced, saveMemoLocal } from "../db/schema";
+import { colors } from "../theme";
 
 type Props = {
   route?: { params?: { eventTitle?: string; eventId?: string } };
@@ -84,8 +85,9 @@ export default function RecordMemo({ route, navigation }: Props) {
       // slow long upload therefore leaves a recoverable local reference rather
       // than making the recording disappear with the error dialog.
       const memoId = newMemoId();
-      await saveMemoLocal(db, memoId, uri, eventId, eventTitle);
-      const { job_id } = await uploadMemo(uri, title || undefined, memoId);
+      const memoTitle = title.trim() || eventTitle;
+      await saveMemoLocal(db, memoId, uri, eventId, memoTitle);
+      const { job_id } = await uploadMemo(uri, memoTitle, memoId);
       // Today may already have marked the event complete before opening this
       // recorder. This idempotent confirmation only attaches the durable memo;
       // it does not create a second event or duplicate a completion action.
@@ -110,6 +112,7 @@ export default function RecordMemo({ route, navigation }: Props) {
       <TextInput
         style={styles.input}
         placeholder="Memo title (optional)"
+        placeholderTextColor={colors.muted}
         value={title}
         onChangeText={setTitle}
         editable={phase === "idle"}
@@ -122,7 +125,7 @@ export default function RecordMemo({ route, navigation }: Props) {
 
       {busy ? (
         <View style={styles.busy}>
-          <ActivityIndicator size="large" color="#6366f1" />
+          <ActivityIndicator size="large" color={colors.primary} />
           <Text style={styles.busyText}>
             Uploading memo…
           </Text>
@@ -142,14 +145,14 @@ export default function RecordMemo({ route, navigation }: Props) {
 }
 
 const styles = StyleSheet.create({
-  container:       { flex: 1, backgroundColor: "#f5f5f5", padding: 24, justifyContent: "center", gap: 32 },
-  input:          { backgroundColor: "#fff", borderRadius: 12, padding: 16, fontSize: 16 },
+  container:       { flex: 1, backgroundColor: colors.canvas, padding: 24, justifyContent: "center", gap: 32 },
+  input:          { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: 12, padding: 16, fontSize: 16, color: colors.ink },
   timerWrap:      { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 12 },
-  timer:          { fontSize: 56, fontWeight: "200", fontVariant: ["tabular-nums"] },
-  recDot:         { width: 16, height: 16, borderRadius: 8, backgroundColor: "#ef4444" },
-  recordBtn:      { backgroundColor: "#6366f1", paddingVertical: 20, borderRadius: 16, alignItems: "center" },
-  recordBtnActive:{ backgroundColor: "#ef4444" },
-  recordBtnText:  { color: "#fff", fontSize: 18, fontWeight: "700" },
+  timer:          { fontSize: 56, fontWeight: "200", fontVariant: ["tabular-nums"], color: colors.ink },
+  recDot:         { width: 16, height: 16, borderRadius: 8, backgroundColor: colors.danger },
+  recordBtn:      { backgroundColor: colors.primary, paddingVertical: 20, borderRadius: 16, alignItems: "center" },
+  recordBtnActive:{ backgroundColor: colors.danger },
+  recordBtnText:  { color: colors.inverse, fontSize: 18, fontWeight: "700" },
   busy:           { alignItems: "center", gap: 16 },
-  busyText:       { color: "#555", fontSize: 15 },
+  busyText:       { color: colors.muted, fontSize: 15 },
 });

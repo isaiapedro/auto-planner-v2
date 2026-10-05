@@ -48,7 +48,8 @@ async def process_memo_pipeline(
                 text(
                     "INSERT INTO observations (id, source_type, file_path, payload) "
                     "VALUES (CAST(:id AS uuid), 'audio', :file_path, CAST(:payload AS jsonb)) "
-                    "ON CONFLICT (id) DO NOTHING"
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "payload = observations.payload || EXCLUDED.payload"
                 ),
                 {"id": obs_id, "file_path": audio_path, "payload": json.dumps({
                     "transcript_path": str(transcript_path),

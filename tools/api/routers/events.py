@@ -9,7 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
-from schemas import CalendarBlockCreate, EventConfirmRequest, EventResponse, EventStatus
+from schemas import CalendarBlockCreate, EventConfirmRequest, EventResponse, EventStatus, LiveCalendarEvent
 from services import calendar as calendar_svc
 
 router = APIRouter(prefix="/events", tags=["events"])
@@ -42,6 +42,33 @@ async def get_events(
         {"start": range_start, "end": range_end},
     )
     return [dict(row._mapping) for row in result.fetchall()]
+
+
+@router.get("/live", response_model=list[LiveCalendarEvent])
+async def get_live_events(start: date, end: date):
+    """Read configured Google Calendar events in a bounded local-date range."""
+    if end <= start:
+        raise HTTPException(status_code=422, detail="end must be after start")
+    if end - start > timedelta(days=31):
+        raise HTTPException(status_code=422, detail="date range cannot exceed 31 days")
+    try:
+        return await asyncio.to_thread(
+            calendar_svc.list_events_in_range,
+            datetime.combine(start, time.min, tzinfo=LOCAL_TZ),
+            datetime.combine(end, time.min, tzinfo=LOCAL_TZ),
+        )
+    except calendar_svc.CalendarAuthenticationError as exc:
+        logger.warning("Live calendar read needs Google Calendar re-authentication")
+        raise HTTPException(
+            status_code=503,
+            detail="Google Calendar authorization needs re-authentication on the host.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Google Calendar read failed")
+        raise HTTPException(
+            status_code=502,
+            detail="Live calendar is temporarily unavailable. Please try again.",
+        ) from exc
 
 
 @router.post("", response_model=EventResponse, status_code=201)

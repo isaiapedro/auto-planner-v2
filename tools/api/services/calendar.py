@@ -25,6 +25,10 @@ _WEEKDAY_RRULE = {
 WEEKDAY_INDEX = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 
 
+class CalendarAuthenticationError(RuntimeError):
+    """The local OAuth grant cannot be used without a host-side re-login."""
+
+
 def _load_credentials() -> Credentials:
     token_path = Path(settings.google_token_path)
     if not token_path.exists():
@@ -35,46 +39,82 @@ def _load_credentials() -> Credentials:
 
     creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
     if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        token_path.write_text(creds.to_json())
+        try:
+            creds.refresh(Request())
+        except Exception as exc:
+            raise CalendarAuthenticationError(
+                "Google Calendar authorization has expired or been revoked. "
+                "Re-authenticate on the host, then try again."
+            ) from exc
+        # Credentials are mounted read-only.  The refreshed token remains
+        # process-local; root-owned credential maintenance persists it.
     return creds
+
+
+def verify_default_calendar_access() -> None:
+    """Fail a batch early when its configured Google grant is unusable.
+
+    This read-only request prevents a revoked token from being retried for
+    every routine occurrence.
+    """
+    creds = _load_credentials()
+    service = build("calendar", "v3", credentials=creds)
+    service.calendars().get(calendarId=DEFAULT_CALENDAR_ID).execute()
 
 
 def list_upcoming_events(days_ahead: int = 14) -> list[dict]:
     """Events across all configured calendars, next `days_ahead` days."""
+    now = datetime.now(timezone.utc)
+    return list_events_in_range(now, now + timedelta(days=days_ahead))
+
+
+def list_events_in_range(start: datetime, end: datetime) -> list[dict]:
+    """Read calendar events in a bounded range without changing them."""
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("calendar range must include a timezone")
+    if end <= start:
+        raise ValueError("calendar range end must be after start")
+
     creds = _load_credentials()
     service = build("calendar", "v3", credentials=creds)
-
-    now = datetime.now(timezone.utc)
-    time_min = now.isoformat()
-    time_max = (now + timedelta(days=days_ahead)).isoformat()
 
     events: list[dict] = []
     for calendar_id in settings.google_calendar_ids.split(","):
         calendar_id = calendar_id.strip()
         if not calendar_id:
             continue
-        resp = (
-            service.events()
-            .list(
-                calendarId=calendar_id,
-                timeMin=time_min,
-                timeMax=time_max,
-                singleEvents=True,
-                orderBy="startTime",
+        page_token = None
+        while True:
+            resp = (
+                service.events()
+                .list(
+                    calendarId=calendar_id,
+                    timeMin=start.isoformat(),
+                    timeMax=end.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                    pageToken=page_token,
+                )
+                .execute()
             )
-            .execute()
-        )
-        for item in resp.get("items", []):
-            events.append(
-                {
-                    "calendar": calendar_id,
-                    "title": item.get("summary", "(no title)"),
-                    "start": item.get("start", {}).get("dateTime") or item.get("start", {}).get("date"),
-                    "end": item.get("end", {}).get("dateTime") or item.get("end", {}).get("date"),
-                }
-            )
-    return events
+            for item in resp.get("items", []):
+                start_value = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date")
+                end_value = item.get("end", {}).get("dateTime") or item.get("end", {}).get("date")
+                if not start_value or not end_value:
+                    continue
+                events.append(
+                    {
+                        "id": item.get("id", ""),
+                        "title": item.get("summary", "(no title)"),
+                        "start": start_value,
+                        "end": end_value,
+                        "all_day": "date" in item.get("start", {}),
+                    }
+                )
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+    return sorted(events, key=lambda item: item["start"])
 
 
 def summarize_busy_windows(days_ahead: int = 14) -> list[dict]:

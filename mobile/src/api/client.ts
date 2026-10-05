@@ -1,11 +1,9 @@
-import { API_BASE_URL, API_TOKEN } from "../config";
+import { API_BASE_URLS, API_TOKEN } from "../config";
+import { File } from "expo-file-system";
 import type {
   AppEvent,
-  AccountProposal,
-  AccountProposalList,
-  AccountTriageRun,
   CurrentInsights,
-  Insight,
+  LiveCalendarEvent,
   MemoListItem,
   MemoStatusResponse,
   MemoUploadResponse,
@@ -14,8 +12,14 @@ import type {
 } from "../types";
 
 const REQUEST_TIMEOUT_MS = 12_000;
+// A routine can contain dozens of deliberate Google Calendar writes. Its
+// response is synchronous, so it needs a longer bounded deadline than reads.
+const ROUTINE_APPLY_TIMEOUT_MS = 120_000;
 const UPLOAD_TIMEOUT_MS = 60_000;
 const RETRY_DELAY_MS = 350;
+const HEALTH_TIMEOUT_MS = 2_500;
+
+let activeApiBaseUrl: string | null = null;
 
 function requestId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -38,7 +42,27 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function resolveApiBaseUrl(): Promise<string> {
+  if (activeApiBaseUrl) return activeApiBaseUrl;
+  for (const candidate of API_BASE_URLS) {
+    try {
+      const health = await fetchWithTimeout(`${candidate}/health`, { headers: { Accept: "application/json" } }, HEALTH_TIMEOUT_MS);
+      if (health.ok) {
+        activeApiBaseUrl = candidate;
+        return candidate;
+      }
+    } catch {
+      // Try the next configured LAN address. Health is read-only and unauthenticated.
+    }
+  }
+  return API_BASE_URLS[0];
+}
+
+function clearUnreachableEndpoint(endpoint: string) {
+  if (activeApiBaseUrl === endpoint) activeApiBaseUrl = null;
+}
+
+async function request<T>(path: string, init?: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
   if (!API_TOKEN) throw new Error("This app is missing its local API access token.");
   const method = (init?.method ?? "GET").toUpperCase();
   // GET has no server-side mutation, so retrying once after a transient
@@ -46,12 +70,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const attempts = method === "GET" ? 2 : 1;
   const correlationId = requestId();
   let lastError: unknown;
+  let lastEndpoint = API_BASE_URLS[0];
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const endpoint = await resolveApiBaseUrl();
+    lastEndpoint = endpoint;
     try {
-      const res = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
+      const res = await fetchWithTimeout(`${endpoint}${path}`, {
         ...init,
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_TOKEN}`, "X-Request-ID": correlationId, ...init?.headers },
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
       if (!res.ok) {
         const err = await res.text();
         throw new Error(`${res.status} ${path}: ${err}`);
@@ -59,13 +86,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       return res.json() as Promise<T>;
     } catch (error) {
       lastError = error;
+      // GET may select another healthy endpoint; writes are never replayed.
+      clearUnreachableEndpoint(endpoint);
       if (attempt + 1 < attempts) await wait(RETRY_DELAY_MS);
     }
   }
   if (lastError instanceof Error && /^(4|5)\d\d /.test(lastError.message)) throw lastError;
   throw new Error(
-    `Cannot reach API at ${API_BASE_URL}${path}. ` +
-      "Use the same Wi-Fi as your PC and open /health in the phone browser first."
+    `Cannot reach API at ${lastEndpoint}${path}. Tried: ${API_BASE_URLS.join(", ")}. ` +
+      "Use the same Wi-Fi as your PC and open the matching /health URL in the phone browser first."
   );
 }
 
@@ -78,14 +107,15 @@ export async function uploadMemo(
 ): Promise<MemoUploadResponse> {
   if (!API_TOKEN) throw new Error("This app is missing its local API access token.");
   const form = new FormData();
-  form.append("file", { uri: audioUri, name: "memo.m4a", type: "audio/mp4" } as any);
+  // Expo's current fetch implementation does not support React Native's
+  // legacy `{ uri, name, type }` multipart part. Its File implements Blob,
+  // allowing the native encoder to read the queued recording correctly.
+  form.append("file", new File(audioUri));
 
   const params = new URLSearchParams();
   if (eventTitle) params.set("event_title", eventTitle);
   if (memoId) params.set("memo_id", memoId);
   const query = params.toString();
-  const url = `${API_BASE_URL}/memos/upload${query ? `?${query}` : ""}`;
-
   // A client-generated UUID makes this POST idempotent: the server returns the
   // existing job if it already stored the recording. One retry covers a dropped
   // response after a successful durable write without creating a second memo.
@@ -93,6 +123,8 @@ export async function uploadMemo(
   const correlationId = requestId();
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const endpoint = await resolveApiBaseUrl();
+    const url = `${endpoint}/memos/upload${query ? `?${query}` : ""}`;
     try {
       const res = await fetchWithTimeout(url, {
         method: "POST",
@@ -103,6 +135,7 @@ export async function uploadMemo(
       return res.json();
     } catch (error) {
       lastError = error;
+      clearUnreachableEndpoint(endpoint);
       if (attempt + 1 < attempts) await wait(RETRY_DELAY_MS);
     }
   }
@@ -110,6 +143,9 @@ export async function uploadMemo(
 }
 
 export async function getMemos(): Promise<MemoListItem[]> {
+  // The authenticated Personal API returns the complete local history by
+  // default. Do not add a client-side cap: the Memos tab is the mobile view of
+  // the user's own `personal/planner/memos/` records.
   return request<MemoListItem[]>("/memos");
 }
 
@@ -130,18 +166,10 @@ export async function confirmEvent(
   });
 }
 
-export async function createCalendarBlock(body: {
-  title: string;
-  scheduled_at: string;
-  duration_minutes: number;
-}): Promise<AppEvent> {
-  return request<AppEvent>("/events", { method: "POST", body: JSON.stringify(body) });
-}
-
-/** Saved Planner events for a half-open calendar-date range [start, end). */
-export async function getEventsForRange(start: string, end: string): Promise<AppEvent[]> {
+/** Read current Google Calendar occurrences; this never changes calendar data. */
+export async function getLiveCalendarEvents(start: string, end: string): Promise<LiveCalendarEvent[]> {
   const params = new URLSearchParams({ start, end });
-  return request<AppEvent[]>(`/events?${params.toString()}`);
+  return request<LiveCalendarEvent[]>(`/events/live?${params.toString()}`);
 }
 
 // ── weekly routine ───────────────────────────────────────────────────────────
@@ -151,7 +179,7 @@ export async function getRoutineWeek() {
 }
 
 export async function applyRoutineWeek() {
-  return request<RoutineApplyResponse>("/routine/apply", { method: "POST" });
+  return request<RoutineApplyResponse>("/routine/apply", { method: "POST" }, ROUTINE_APPLY_TIMEOUT_MS);
 }
 
 export async function syncRoutineEventsLocal() {
@@ -170,61 +198,8 @@ export async function getCurrentInsights(): Promise<CurrentInsights> {
   return request("/insights/current");
 }
 
-// ── account inbox ────────────────────────────────────────────────────────────
-
-/** Proposals are intentionally metadata-only; source evidence stays server-side. */
-export async function getAccountProposals(): Promise<AccountProposalList> {
-  const result = await request<AccountProposalList | AccountProposal[]>("/account/proposals?status=proposed");
-  return Array.isArray(result) ? { proposals: result } : { proposals: result.proposals ?? [], generated_at: result.generated_at };
-}
-
-/**
- * Account runs are intentionally rendered as aggregate operational metadata.
- * The server may add safe model/fallback fields over time; transcript evidence
- * and memo references remain opaque to the client.
- */
-export async function getAccountRuns(): Promise<AccountTriageRun[]> {
-  const result = await request<AccountTriageRun[] | { runs?: AccountTriageRun[] }>("/account/runs");
-  const rows = Array.isArray(result) ? result : result.runs ?? [];
-  return rows.map((row) => {
-    // Accept additive backend naming while keeping the screen metadata-only.
-    // Raw failure details deliberately never cross this normalization boundary.
-    const candidate = row as AccountTriageRun & Record<string, unknown>;
-    return {
-      ...row,
-      proposal_ids: Array.isArray(row.proposal_ids) ? row.proposal_ids : [],
-      memo_ids: Array.isArray(row.memo_ids) ? row.memo_ids : [],
-      model_label: typeof candidate.model_label === "string" ? candidate.model_label : typeof candidate.model_id === "string" ? candidate.model_id : typeof candidate.model === "string" ? candidate.model : undefined,
-      fallback_used: typeof candidate.fallback_used === "boolean" ? candidate.fallback_used : typeof candidate.used_fallback === "boolean" ? candidate.used_fallback : row.status === "needs_manual_review",
-      completed_at: typeof candidate.completed_at === "string" ? candidate.completed_at : typeof candidate.finished_at === "string" ? candidate.finished_at : undefined,
-    };
-  });
-}
-
-/** Fetch a resolved outcome list without asking the API to expose evidence. */
-export async function getAccountProposalsByStatus(status: "accepted" | "dismissed"): Promise<AccountProposal[]> {
-  const result = await request<AccountProposalList | AccountProposal[]>(`/account/proposals?status=${status}`);
-  return Array.isArray(result) ? result : result.proposals ?? [];
-}
-
-export async function acceptAccountProposal(proposalId: string): Promise<AccountProposal> {
-  return request<AccountProposal>(`/account/proposals/${encodeURIComponent(proposalId)}/accept`, { method: "POST" });
-}
-
-export async function dismissAccountProposal(proposalId: string): Promise<AccountProposal> {
-  return request<AccountProposal>(`/account/proposals/${encodeURIComponent(proposalId)}/dismiss`, { method: "POST" });
-}
-
-/** Starts an explicit, metadata-only account review for completed memo IDs. */
-export async function runAccountTriage(memoIds: string[], instruction?: string): Promise<AccountTriageRun> {
-  return request<AccountTriageRun>("/account/triage", {
-    method: "POST",
-    body: JSON.stringify({ memo_ids: memoIds, instruction: instruction?.trim() || undefined }),
-  });
-}
-
 // ── sync ──────────────────────────────────────────────────────────────────────
 
-export async function syncPull(): Promise<{ events: AppEvent[]; latest_insight: Insight | null }> {
+export async function syncPull(): Promise<{ events: AppEvent[] }> {
   return request("/sync/pull");
 }

@@ -2,7 +2,7 @@
   "expo": {
     "name": "PIOS",
     "slug": "pios",
-    "version": "0.1.0",
+    "version": "0.1.2",
     "orientation": "portrait",
     "scheme": "pios",
     "plugins": [

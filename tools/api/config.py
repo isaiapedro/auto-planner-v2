@@ -8,8 +8,8 @@ def _default_knowledge_root() -> str:
     api_dir = Path(__file__).resolve().parent
     try:
         # config.py lives at services/planner/implementation/tools/api/.  The
-        # workspace root is five parents up (not four, which is services/).
-        repo_root = api_dir.parents[5]
+        # workspace root is four parents up; five is its containing directory.
+        repo_root = api_dir.parents[4]
         candidate = repo_root / "knowledge"
         if candidate.is_dir():
             return str(candidate)
@@ -18,19 +18,10 @@ def _default_knowledge_root() -> str:
     return "/knowledge"
 
 
-def _workspace_file(relative_path: str) -> str:
-    """Return a local-workspace contract path; Compose overrides these paths."""
-    api_dir = Path(__file__).resolve().parent
-    try:
-        return str(api_dir.parents[5] / relative_path)
-    except IndexError:
-        return relative_path
-
-
 def _default_personal_transcripts() -> str:
     api_dir = Path(__file__).resolve().parent
     try:
-        repo_root = api_dir.parents[5]
+        repo_root = api_dir.parents[4]
         candidate = repo_root / "personal" / "planner" / "memos" / "transcripts"
         candidate.mkdir(parents=True, exist_ok=True)
         return str(candidate)
@@ -42,7 +33,7 @@ def _default_personal_transcripts() -> str:
 def _default_personal_memos() -> str:
     api_dir = Path(__file__).resolve().parent
     try:
-        repo_root = api_dir.parents[5]
+        repo_root = api_dir.parents[4]
         candidate = repo_root / "personal" / "planner" / "memos"
         candidate.mkdir(parents=True, exist_ok=True)
         return str(candidate)
@@ -54,7 +45,7 @@ def _default_personal_memos() -> str:
 def _default_personal_insights() -> str:
     api_dir = Path(__file__).resolve().parent
     try:
-        repo_root = api_dir.parents[5]
+        repo_root = api_dir.parents[4]
         candidate = repo_root / "personal" / "planner" / "insights"
         if candidate.is_dir():
             return str(candidate)
@@ -96,12 +87,6 @@ class Settings(BaseSettings):
         "isaiacontato@gmail.com,pedro.souza@petlove.com.br,pedrosouza@estudante.ufscar.br"
     )
     knowledge_root_path: str = _default_knowledge_root()
-    # In containers these point to three explicitly mounted Registry contracts,
-    # not to the host workspace root. The catalog service only resolves targets
-    # inside the existing /personal and /knowledge mounts.
-    account_workspace_manifest_path: str = _workspace_file("manifest.yaml")
-    account_catalog_path: str = _workspace_file("registry/account_catalog.yaml")
-    account_repository_registry_path: str = _workspace_file("registry/repositories.yaml")
     planning_horizon_days: int = 7
     max_daily_exploration_minutes: int = 240
     planning_repair_attempts: int = 3

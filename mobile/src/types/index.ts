@@ -1,5 +1,4 @@
 export type EventStatus = "pending" | "confirmed" | "skipped";
-export type PeriodType = "daily" | "weekly" | "monthly";
 
 export interface AppEvent {
   id: string;
@@ -20,49 +19,6 @@ export interface CurrentInsights {
   inference_bundle: InferenceBundle;
 }
 
-/**
- * A reviewable cross-domain suggestion. Deliberately contains no transcript
- * text, repository paths, or source excerpts; the server keeps that evidence
- * in the private audit record.
- */
-export interface AccountProposal {
-  id: string;
-  kind: string;
-  title: string;
-  summary: string;
-  /** Catalog destination identifier, never a filesystem path. */
-  target: string;
-  status: "proposed" | "accepted" | "dismissed" | "failed" | string;
-  confidence: "high" | "medium" | "low" | "none" | string;
-  created_at: string;
-  /** Opaque memo references; the UI uses only the count. */
-  memo_ids: string[];
-  requires_confirmation: boolean;
-  resolved_at?: string | null;
-}
-
-export interface AccountProposalList {
-  proposals: AccountProposal[];
-  generated_at?: string;
-}
-
-/** Metadata returned after an explicit account-triage command. */
-export interface AccountTriageRun {
-  id: string;
-  status: "completed" | "needs_manual_review" | string;
-  /** Opaque references are retained only for counts; never render them. */
-  memo_ids: string[];
-  proposal_ids: string[];
-  used_llm: boolean;
-  created_at: string;
-  /** Optional operational metadata for the audit timeline. */
-  completed_at?: string;
-  model_label?: string;
-  fallback_used?: boolean;
-  fallback_reason?: "unavailable" | "invalid_output" | "policy" | "unknown" | string;
-  policy_version?: string;
-}
-
 export interface BlockChange {
   action: "add" | "move" | "remove";
   block_id?: string;
@@ -75,30 +31,11 @@ export interface BlockChange {
   duration_minutes?: number;
 }
 
-export interface ScheduleRecommendation {
-  reasoning: string;
-  blocks: BlockChange[];
-}
-
 export interface RoutineAdherence {
   planned: number;
   confirmed: number;
   adherence_rate: number;
   missed: string[];
-}
-
-export interface Insight {
-  id: string;
-  period_type: PeriodType;
-  period_start: string;
-  narrative: string;
-  schedule_recommendation: ScheduleRecommendation | null;
-  accepted: boolean;
-  generated_at: string;
-  memo_refs?: string[];
-  routine_adherence?: RoutineAdherence | null;
-  behavioral_context?: string | null;
-  inference_bundle?: InferenceBundle | null;
 }
 
 export interface ReviewFinding {
@@ -111,6 +48,14 @@ export interface ScientificSupport {
   claim: string;
   source_path: string;
   applicability: string;
+}
+
+/** A cited observation about how registered planning targets interacted. */
+export interface GoalRelationship {
+  statement: string;
+  targets: Array<{ id?: string; priority_key?: string }>;
+  evidence_paths: string[];
+  confidence: "high" | "medium" | "low";
 }
 
 export interface InferenceBundle {
@@ -140,6 +85,9 @@ export interface InferenceBundle {
     progress_updates: ReviewFinding[];
     new_additions: ReviewFinding[];
     unresolved_questions: string[];
+    /** Additive schema-1.2 fields; absent in older saved reviews. */
+    conflicts?: GoalRelationship[];
+    facilitators?: GoalRelationship[];
   };
   life_pillar_review: {
     summary: string;
@@ -186,8 +134,18 @@ export interface MemoListItem {
   status: "queued" | "transcribing" | "done" | "error";
   event_title: string | null;
   created_at: string;
+  /** False when a migrated memo preserved only its recording date. */
+  recorded_at_known: boolean;
   transcript: string | null;
   error: string | null;
+}
+
+export interface LiveCalendarEvent {
+  id: string;
+  title: string;
+  start: string;
+  end: string;
+  all_day: boolean;
 }
 
 // SQLite local types

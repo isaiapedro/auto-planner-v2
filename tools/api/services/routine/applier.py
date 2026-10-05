@@ -55,6 +55,10 @@ async def _persist_routine(
     created_google_events: list[str] = []
 
     try:
+        if write_google_calendar:
+            # Validate once before a potentially large mutation batch. This
+            # does not change Google Calendar.
+            await asyncio.to_thread(calendar_svc.verify_default_calendar_access)
         for event in routine.events:
             inserted_here = False
             routine_key = ""

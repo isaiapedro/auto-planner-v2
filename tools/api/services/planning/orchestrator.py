@@ -71,7 +71,7 @@ async def create_planning_run(db: AsyncSession, body: PlanningWeekRequest) -> Pl
     started = trace.start()
     evidence = wiki_service.search(
         query=search_terms,
-        domains=["health", "technology", "business", "media", "arts", "personal"],
+        domains=["planning_science", "health", "technology", "business", "media", "arts"],
         categories=["wiki", "papers", "concepts", "raw", "general"],
         limit=8,
     )

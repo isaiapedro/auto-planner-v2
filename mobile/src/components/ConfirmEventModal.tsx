@@ -14,6 +14,7 @@ import React from "react";
 import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
 
 import type { AppEvent } from "../types";
+import { colors } from "../theme";
 
 type Step = "confirm" | "memo";
 
@@ -77,13 +78,13 @@ export default function ConfirmEventModal({
 
 const styles = StyleSheet.create({
   backdrop:  { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
-  sheet:     { backgroundColor: "#fff", padding: 24, borderTopLeftRadius: 24, borderTopRightRadius: 24, gap: 20 },
-  q:         { fontSize: 18, fontWeight: "600", textAlign: "center" },
+  sheet:     { backgroundColor: colors.surface, padding: 24, borderTopLeftRadius: 24, borderTopRightRadius: 24, gap: 20 },
+  q:         { fontSize: 18, fontWeight: "600", textAlign: "center", color: colors.ink },
   row:       { flexDirection: "row", gap: 12 },
   btn:       { flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: "center" },
-  yes:       { backgroundColor: "#22c55e" },
-  no:        { backgroundColor: "#ef4444" },
-  plain:     { backgroundColor: "#f3f4f6", borderWidth: 1, borderColor: "#d1d5db" },
-  btnText:   { color: "#fff", fontWeight: "700" },
-  plainText: { color: "#374151", fontWeight: "700" },
+  yes:       { backgroundColor: colors.success },
+  no:        { backgroundColor: colors.danger },
+  plain:     { backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.border },
+  btnText:   { color: colors.inverse, fontWeight: "700" },
+  plainText: { color: colors.ink, fontWeight: "700" },
 });

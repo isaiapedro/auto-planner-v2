@@ -91,6 +91,20 @@ export async function getPendingEvents(db: SQLite.SQLiteDatabase) {
   );
 }
 
+export async function getEventsForToday(db: SQLite.SQLiteDatabase) {
+  return db.getAllAsync<{
+    id: string;
+    title: string;
+    scheduled_at: string;
+    status: "pending" | "confirmed" | "skipped";
+    memo_id: string | null;
+  }>(
+    `SELECT id, title, scheduled_at, status, memo_id FROM events
+     WHERE date(scheduled_at, 'localtime') = date('now', 'localtime')
+     ORDER BY scheduled_at ASC`
+  );
+}
+
 export async function saveMemoLocal(
   db: SQLite.SQLiteDatabase,
   id: string,

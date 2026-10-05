@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # --- enums ---
@@ -14,12 +14,6 @@ class EventStatus(str, Enum):
     pending = "pending"
     confirmed = "confirmed"
     skipped = "skipped"
-
-
-class PeriodType(str, Enum):
-    daily = "daily"
-    weekly = "weekly"
-    monthly = "monthly"
 
 
 # --- memo ---
@@ -40,132 +34,16 @@ class MemoHistoryItem(BaseModel):
     status: str
     event_title: str | None = None
     created_at: datetime
+    recorded_at_known: bool = True
     transcript: str | None = None
     error: str | None = None
-
-
-# --- command-triggered Personal account triage ---
-
-AccountProposalKind = Literal[
-    "planner_future_task",
-    "career_note",
-    "finance_note",
-    "knowledge_technology_research_request",
-    "manual_review",
-]
-AccountProposalTarget = Literal[
-    "personal_planner",
-    "personal_career_strategy",
-    "personal_finance",
-    "knowledge_technology",
-]
-AccountProposalStatus = Literal["proposed", "accepted", "dismissed"]
-
-
-class AccountTriageRequest(BaseModel):
-    """An explicit request to analyse already-completed Personal memo IDs only."""
-
-    memo_ids: list[UUID] = Field(min_length=1, max_length=20)
-    instruction: str | None = Field(default=None, max_length=500)
-
-
-class AccountProposalResponse(BaseModel):
-    id: UUID
-    run_id: UUID
-    kind: AccountProposalKind
-    target: AccountProposalTarget
-    title: str
-    summary: str
-    confidence: Literal["high", "medium", "low"]
-    status: AccountProposalStatus
-    requires_confirmation: bool = True
-    memo_ids: list[UUID]
-    created_at: datetime
-    resolved_at: datetime | None = None
-
-
-class AccountTriageRunResponse(BaseModel):
-    id: UUID
-    status: Literal["completed", "needs_manual_review"]
-    memo_ids: list[UUID]
-    proposal_ids: list[UUID]
-    used_llm: bool
-    created_at: datetime
-
-
-class AccountAuditEventResponse(BaseModel):
-    """Metadata-only account lifecycle event.
-
-    This intentionally has no memo IDs, transcript identifiers/hashes, prompt
-    material, file paths, or adapter payloads. It is safe for an authenticated
-    account audit timeline.
-    """
-
-    event_id: UUID
-    event_type: Literal[
-        "triage_started", "triage_completed", "triage_fallback",
-        "catalog_denied", "proposal_accepted", "proposal_dismissed",
-    ]
-    occurred_at: datetime
-    run_id: UUID | None = None
-    proposal_id: UUID | None = None
-    proposal_kind: AccountProposalKind | None = None
-    target: AccountProposalTarget | None = None
-    memo_count: int | None = Field(default=None, ge=0, le=20)
-    proposal_count: int | None = Field(default=None, ge=0, le=12)
-    duration_ms: int | None = Field(default=None, ge=0)
-    model_id: str | None = None
-    outcome: Literal["started", "completed", "fallback", "accepted", "dismissed", "denied"]
-    error_class: str | None = None
-
-
-class AccountRunAuditResponse(BaseModel):
-    """Redacted provenance and lifecycle timeline for one triage run."""
-
-    run_id: UUID
-    status: Literal["completed", "needs_manual_review"]
-    created_at: datetime
-    model_id: str | None = None
-    catalog_sha256: str
-    catalog_schema_version: str
-    triage_schema_version: str
-    instruction_sha256: str
-    duration_ms: int | None = Field(default=None, ge=0)
-    outcome: Literal["completed", "fallback"]
-    events: list[AccountAuditEventResponse] = Field(default_factory=list)
-
-
-class CatalogContextResource(BaseModel):
-    """A declared relative context document; its content is never returned."""
-
-    path: str
-
-
-class AccountDestination(BaseModel):
-    id: str
-    path: str
-    repository_id: str
-    privacy: Literal["personal_only", "objective_reference"]
-    readable_context: list[CatalogContextResource] = Field(default_factory=list)
-    proposal_capabilities: list[str] = Field(default_factory=list)
-
-
-class AccountCatalogResponse(BaseModel):
-    schema_version: Literal["1.0"]
-    catalog_path: str
-    # A SHA-256 over the mounted declarative contracts and every approved
-    # manifest/context file. It is safe to expose: it contains no file content
-    # or absolute path, but lets runs prove exactly which contract revision
-    # authorized them.
-    catalog_fingerprint: str
-    destinations: list[AccountDestination]
 
 
 # --- events ---
 
 class EventConfirmRequest(BaseModel):
     confirmed: bool
-    memo_id: str | None = None
+    memo_id: UUID | None = None
 
 
 class CalendarBlockCreate(BaseModel):
@@ -181,6 +59,16 @@ class EventResponse(BaseModel):
     duration_minutes: int = Field(default=60, ge=5, le=1_440)
     status: EventStatus
     memo_id: UUID | None = None
+
+
+class LiveCalendarEvent(BaseModel):
+    """A read-only Google Calendar occurrence for the authenticated device."""
+
+    id: str
+    title: str
+    start: str
+    end: str
+    all_day: bool = False
 
 
 # --- shared planning inputs ---
@@ -247,26 +135,27 @@ class BlockChange(BaseModel):
     duration_minutes: int | None = None
 
 
-class ScheduleRecommendation(BaseModel):
-    reasoning: str
-    blocks: list[BlockChange]
-
-
 # --- insights ---
 
-class ReviewFinding(BaseModel):
+class InsightContractModel(BaseModel):
+    """Reject LLM-added or mistyped fields at the saved-artifact boundary."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class ReviewFinding(InsightContractModel):
     statement: str
     evidence_paths: list[str] = Field(default_factory=list)
     confidence: Literal["high", "medium", "low", "none"]
 
 
-class ScientificSupport(BaseModel):
+class ScientificSupport(InsightContractModel):
     claim: str
     source_path: str
     applicability: str
 
 
-class RoutineReview(BaseModel):
+class RoutineReview(InsightContractModel):
     summary: str
     metrics: dict[str, Any] = Field(default_factory=dict)
     worked: list[ReviewFinding] = Field(default_factory=list)
@@ -274,7 +163,7 @@ class RoutineReview(BaseModel):
     experiments: list[str] = Field(default_factory=list)
 
 
-class GoalAssessment(BaseModel):
+class GoalAssessment(InsightContractModel):
     id: str | None = None
     priority_key: str | None = None
     status: Literal["evidenced", "scheduled", "partially_evidenced", "not_tracked", "at_risk", "complete"]
@@ -283,21 +172,60 @@ class GoalAssessment(BaseModel):
     findings: list[ReviewFinding] = Field(default_factory=list)
     recommendations: list[ScientificSupport] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def identifies_one_registry_target(self) -> "GoalAssessment":
+        if bool(self.id) == bool(self.priority_key):
+            raise ValueError("each goal assessment must set exactly one of id or priority_key")
+        return self
 
-class GoalReview(BaseModel):
+
+class GoalReview(InsightContractModel):
     registry_path: Literal["../archive/long_term_goals.md"]
     summary: str
     assessments: list[GoalAssessment] = Field(default_factory=list)
 
 
-class FuturePlanReview(BaseModel):
+class FuturePlanReview(InsightContractModel):
     summary: str
     progress_updates: list[ReviewFinding] = Field(default_factory=list)
     new_additions: list[ReviewFinding] = Field(default_factory=list)
     unresolved_questions: list[str] = Field(default_factory=list)
+    # Additive 1.2 fields.  They record an observed relationship between
+    # registered planning targets; they are not instructions or diagnoses.
+    conflicts: list["GoalRelationship"] = Field(default_factory=list)
+    facilitators: list["GoalRelationship"] = Field(default_factory=list)
 
 
-class InferenceBundle(BaseModel):
+class GoalReference(InsightContractModel):
+    """One canonical planning target participating in a review relationship."""
+
+    id: str | None = None
+    priority_key: str | None = None
+
+    @model_validator(mode="after")
+    def identifies_one_registry_target(self) -> "GoalReference":
+        if bool(self.id) == bool(self.priority_key):
+            raise ValueError("each relationship target must set exactly one of id or priority_key")
+        return self
+
+
+class GoalRelationship(InsightContractModel):
+    """A cited, observational connection between two or more registered targets."""
+
+    statement: str
+    targets: list[GoalReference] = Field(min_length=2)
+    evidence_paths: list[str] = Field(min_length=1)
+    confidence: Literal["high", "medium", "low"]
+
+    @model_validator(mode="after")
+    def has_distinct_targets(self) -> "GoalRelationship":
+        keys = [target.id or target.priority_key for target in self.targets]
+        if len(keys) != len(set(keys)):
+            raise ValueError("relationship targets must be distinct")
+        return self
+
+
+class InferenceBundle(InsightContractModel):
     schema_version: Literal["1.2"]
     routine_review: RoutineReview
     goal_review: GoalReview
@@ -305,7 +233,7 @@ class InferenceBundle(BaseModel):
     life_pillar_review: "LifePillarReview"
 
 
-class PillarTopic(BaseModel):
+class PillarTopic(InsightContractModel):
     name: str
     status: Literal["tracked", "partially_tracked", "not_tracked"]
     evidence_paths: list[str] = Field(default_factory=list)
@@ -314,48 +242,17 @@ class PillarTopic(BaseModel):
     recommendations: list[ScientificSupport] = Field(default_factory=list)
 
 
-class PillarGroup(BaseModel):
+class PillarGroup(InsightContractModel):
     name: str
     topics: list[PillarTopic]
 
 
-class LifePillarReview(BaseModel):
+class LifePillarReview(InsightContractModel):
     summary: str
     groups: list[PillarGroup]
 
 
-class InferenceLogResponse(BaseModel):
-    id: UUID
-    inference_type: Literal["routine", "goals", "future_plans", "life_pillars"]
-    schema_version: str
-    status: Literal["valid", "invalid", "failed"]
-    input_hash: str
-    output: dict[str, Any] | None = None
-    citation_paths: list[str] = Field(default_factory=list)
-    model: str | None = None
-    error_message: str | None = None
-    created_at: datetime
-
-class InsightResponse(BaseModel):
-    id: UUID
-    period_type: PeriodType
-    period_start: str
-    narrative: str
-    schedule_recommendation: ScheduleRecommendation | None = None
-    accepted: bool
-    generated_at: datetime
-    memo_refs: list[UUID] = []
-    routine_adherence: dict | None = None
-    behavioral_context: str | None = None
-    inference_bundle: InferenceBundle | None = None
-
-
-class InsightSubmitRequest(BaseModel):
-    narrative: str
-    schedule_recommendation: ScheduleRecommendation | None = None
-
-
-class CurrentInsightsResponse(BaseModel):
+class CurrentInsightsResponse(InsightContractModel):
     schema_version: Literal["1.2"]
     generated_at: datetime
     source_files: list[str]
@@ -363,14 +260,16 @@ class CurrentInsightsResponse(BaseModel):
     narrative: str
     inference_bundle: InferenceBundle
 
-
-class AcceptRecommendationResponse(BaseModel):
-    accepted: bool
-    blocks_applied: int
+    @model_validator(mode="after")
+    def has_unique_nonempty_source_paths(self) -> "CurrentInsightsResponse":
+        if not self.source_files or len(self.source_files) != len(set(self.source_files)):
+            raise ValueError("source_files must be non-empty and unique")
+        if any(not source.startswith("personal/planner/") for source in self.source_files):
+            raise ValueError("source_files must remain within personal/planner/")
+        return self
 
 
 # --- sync ---
 
 class SyncPullResponse(BaseModel):
     events: list[EventResponse]
-    latest_insight: InsightResponse | None = None

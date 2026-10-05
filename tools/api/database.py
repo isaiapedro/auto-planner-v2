@@ -38,6 +38,16 @@ async def ensure_memo_jobs_schema() -> None:
         await connection.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_memo_jobs_queue ON memo_jobs (status, queued_at)"
         ))
+        # Older uploads created the queue row before the corresponding
+        # observation. Backfill those durable recordings so an event can link
+        # its memo immediately, even before transcription completes.
+        await connection.execute(text("""
+            INSERT INTO observations (id, source_type, file_path, payload, captured_at)
+            SELECT id, 'audio', audio_path,
+                   jsonb_build_object('event_title', event_title), queued_at
+            FROM memo_jobs
+            ON CONFLICT (id) DO NOTHING
+        """))
 
 
 async def ensure_insight_audit_schema() -> None:

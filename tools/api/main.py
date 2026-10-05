@@ -10,8 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from config import settings
-from database import engine, ensure_insight_audit_schema, ensure_memo_jobs_schema, ensure_routine_occurrence_schema
-from routers import account, account_catalog, calendar_auth, dashboard, events, goals, insights, memos, planning, routine, sync
+from database import engine, ensure_memo_jobs_schema, ensure_routine_occurrence_schema
+from routers import dashboard, events, goals, insights, memos, planning, routine, sync
 from services.pipeline import run_memo_worker
 from services.observability import configure_logging, log_event, request_id
 
@@ -24,14 +24,13 @@ def _route_category(path: str) -> str:
     if path == "/health":
         return "/health"
     family = path.lstrip("/").split("/", 1)[0]
-    return f"/{family}" if family in {"account", "memos", "events", "routine", "planning", "goals", "dashboard", "insights", "sync", "calendar-auth"} else "/unknown"
+    return f"/{family}" if family in {"memos", "events", "routine", "planning", "goals", "dashboard", "insights", "sync"} else "/unknown"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Fail startup loudly if the durable Personal memo queue cannot be created.
     await ensure_memo_jobs_schema()
-    await ensure_insight_audit_schema()
     await ensure_routine_occurrence_schema()
     worker = asyncio.create_task(run_memo_worker(), name="memo-transcription-worker")
     try:
@@ -74,6 +73,15 @@ async def require_api_token(request: Request, call_next):
     started = time.perf_counter()
     response = None
     try:
+        # Completion logs alone cannot distinguish an absent mobile action from
+        # a client disconnect during a slow, explicit calendar-write request.
+        # Keep this metadata-only: no headers, body, token, or Personal data.
+        log_event(
+            logger,
+            "api_request_started",
+            method=request.method,
+            route=_route_category(request.url.path),
+        )
         if request.method != "OPTIONS" and request.url.path != "/health":
             authorization = request.headers.get("authorization", "")
             scheme, _, access_token = authorization.partition(" ")
@@ -98,8 +106,6 @@ async def require_api_token(request: Request, call_next):
         request_id.reset(token)
 
 app.include_router(memos.router)
-app.include_router(account.router)
-app.include_router(account_catalog.router)
 app.include_router(events.router)
 app.include_router(routine.router)
 app.include_router(planning.router)
@@ -107,7 +113,6 @@ app.include_router(goals.router)
 app.include_router(dashboard.router)
 app.include_router(insights.router)
 app.include_router(sync.router)
-app.include_router(calendar_auth.router)
 
 
 @app.get("/health")

@@ -10,6 +10,7 @@ import {
 } from "react-native";
 
 import { applyRoutineWeek, getRoutineWeek } from "../api/client";
+import { colors } from "../theme";
 import type { RoutineCalendar, RoutineCalendarEvent } from "../types";
 
 type Props = {
@@ -148,37 +149,37 @@ export default function RoutineWeekScreen({ onDone, navigation }: Props) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f5f5f5" },
+  container: { flex: 1, backgroundColor: colors.canvas },
   content: { padding: 16, gap: 12, paddingBottom: 32 },
   center: { flex: 1, justifyContent: "center", alignItems: "center", padding: 24 },
-  heading: { fontSize: 22, fontWeight: "700" },
-  subheading: { fontSize: 14, color: "#666" },
+  heading: { fontSize: 22, fontWeight: "700", color: colors.ink },
+  subheading: { fontSize: 14, color: colors.muted },
   metaCard: {
-    backgroundColor: "#ecfdf5",
-    borderColor: "#6ee7b7",
+    backgroundColor: colors.successSoft,
+    borderColor: colors.success,
     borderWidth: 1,
     padding: 12,
     borderRadius: 10,
     gap: 4,
   },
-  metaRow: { fontSize: 13, color: "#065f46" },
-  metaHint: { fontSize: 12, color: "#047857", lineHeight: 17, marginTop: 4 },
-  card: { backgroundColor: "#fff", padding: 16, borderRadius: 12, gap: 8 },
-  dayLabel: { fontSize: 14, fontWeight: "700", color: "#111827", marginBottom: 4 },
+  metaRow: { fontSize: 13, color: colors.successText },
+  metaHint: { fontSize: 12, color: colors.successText, lineHeight: 17, marginTop: 4 },
+  card: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, padding: 16, borderRadius: 12, gap: 8 },
+  dayLabel: { fontSize: 14, fontWeight: "700", color: colors.ink, marginBottom: 4 },
   eventRow: { flexDirection: "row", gap: 10, paddingVertical: 4 },
-  eventTime: { width: 92, fontSize: 12, color: "#6366f1", fontWeight: "600" },
+  eventTime: { width: 92, fontSize: 12, color: colors.primary, fontWeight: "600" },
   eventBody: { flex: 1, gap: 2 },
-  eventTitle: { fontSize: 14, color: "#374151" },
-  eventNotes: { fontSize: 12, color: "#6b7280", fontStyle: "italic" },
+  eventTitle: { fontSize: 14, color: colors.ink },
+  eventNotes: { fontSize: 12, color: colors.muted, fontStyle: "italic" },
   applyBtn: {
-    backgroundColor: "#059669",
+    backgroundColor: colors.success,
     paddingVertical: 16,
     borderRadius: 12,
     alignItems: "center",
     marginTop: 8,
   },
-  applyText: { color: "#fff", fontWeight: "700", fontSize: 16 },
-  error: { fontSize: 15, color: "#374151", textAlign: "center", marginBottom: 12 },
-  retryBtn: { backgroundColor: "#6366f1", paddingHorizontal: 20, paddingVertical: 10, borderRadius: 8 },
-  retryText: { color: "#fff", fontWeight: "700" },
+  applyText: { color: colors.inverse, fontWeight: "700", fontSize: 16 },
+  error: { fontSize: 15, color: colors.ink, textAlign: "center", marginBottom: 12 },
+  retryBtn: { backgroundColor: colors.primary, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 8 },
+  retryText: { color: colors.inverse, fontWeight: "700" },
 });

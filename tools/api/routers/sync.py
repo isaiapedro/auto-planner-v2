@@ -28,14 +28,4 @@ async def sync_pull(db: AsyncSession = Depends(get_db)):
     )
     events = [dict(r._mapping) for r in events_result.fetchall()]
 
-    insight_result = await db.execute(
-        text(
-            "SELECT id, period_type, period_start::text, narrative, "
-            "schedule_recommendation, accepted, generated_at "
-            "FROM insights ORDER BY generated_at DESC LIMIT 1"
-        )
-    )
-    insight_row = insight_result.fetchone()
-    latest_insight = dict(insight_row._mapping) if insight_row else None
-
-    return SyncPullResponse(events=events, latest_insight=latest_insight)
+    return SyncPullResponse(events=events)

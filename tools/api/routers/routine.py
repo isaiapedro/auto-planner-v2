@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
+from services import calendar as calendar_svc
 from services.routine.applier import apply_routine_week, sync_routine_events_local
 from services.routine.loader import RoutineCalendar, load_routine_calendar
 
@@ -41,6 +42,12 @@ async def apply_routine(db: AsyncSession = Depends(get_db)):
     try:
         result = await apply_routine_week(db)
         return RoutineApplyResponse.model_validate(result)
+    except calendar_svc.CalendarAuthenticationError as exc:
+        logger.warning("Routine apply needs Google Calendar re-authentication")
+        raise HTTPException(
+            status_code=503,
+            detail="Google Calendar authorization needs re-authentication on the host. No routine events were created.",
+        ) from exc
     except FileNotFoundError as exc:
         logger.exception("Routine calendar source is unavailable")
         raise HTTPException(status_code=404, detail="Routine calendar is not available") from exc

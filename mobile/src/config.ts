@@ -28,17 +28,30 @@ function isConfiguredApiUrl(value: string | undefined): value is string {
   return true;
 }
 
-function resolveApiBaseUrl(): string {
-  const configured = process.env.EXPO_PUBLIC_API_URL;
-  if (isConfiguredApiUrl(configured)) {
+function normalizedApiUrl(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
+function configuredApiUrls(): string[] {
+  const candidates = [
+    ...(process.env.EXPO_PUBLIC_API_URLS?.split(",") ?? []),
+    process.env.EXPO_PUBLIC_API_URL,
+  ];
+  return [...new Set(candidates.filter(isConfiguredApiUrl).map(normalizedApiUrl))];
+}
+
+function resolveApiBaseUrls(): string[] {
+  const configured = configuredApiUrls();
+  if (configured.length > 0) {
     return configured;
   }
   const host = devServerHost();
   if (host) {
-    return `http://${host}:8000`;
+    return [`http://${host}:8000`];
   }
-  return platformFallback();
+  return [platformFallback()];
 }
 
-export const API_BASE_URL = resolveApiBaseUrl();
+/** Ordered LAN endpoints. The client health-checks these before each uncached request. */
+export const API_BASE_URLS = resolveApiBaseUrls();
 export const API_TOKEN = process.env.EXPO_PUBLIC_PIOS_API_TOKEN?.trim() ?? "";

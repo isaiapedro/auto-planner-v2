@@ -5,30 +5,30 @@ import type { TextStyle, ViewStyle } from "react-native";
  * roles instead of introducing literal palette values or control geometry.
  */
 export const colors = {
-  canvas: "#f4f6fb",
-  surface: "#ffffff",
-  surfaceRaised: "#ffffff",
-  ink: "#172033",
-  muted: "#68738a",
-  border: "#e6e9f2",
-  primary: "#5b5bd6",
-  primarySoft: "#eeedff",
-  success: "#237b66",
-  successSoft: "#e5f5ef",
-  warning: "#a96100",
-  warningSoft: "#fff2d9",
-  danger: "#b42318",
-  dangerSoft: "#feeceb",
-  info: "#456a9e",
-  infoSoft: "#eaf1fa",
+  canvas: "#10131a",
+  surface: "#191e28",
+  surfaceRaised: "#222936",
+  ink: "#f3f6fb",
+  muted: "#a9b4c7",
+  border: "#303949",
+  primary: "#aaa8ff",
+  primarySoft: "#292846",
+  success: "#67d3ad",
+  successSoft: "#183a31",
+  warning: "#ffc46b",
+  warningSoft: "#40331d",
+  danger: "#ff8f8a",
+  dangerSoft: "#422324",
+  info: "#8dbdff",
+  infoSoft: "#1d314c",
   inverse: "#ffffff",
-  inverseSurface: "#172033",
-  inverseMuted: "#a6b4d0",
-  inverseBorder: "#40506a",
-  primaryText: "#3d3a8e",
-  successText: "#4b6f65",
-  warningText: "#805417",
-  track: "#edf0f6",
+  inverseSurface: "#0b0e14",
+  inverseMuted: "#b7c2d7",
+  inverseBorder: "#3a4557",
+  primaryText: "#d7d6ff",
+  successText: "#b1ead6",
+  warningText: "#ffe1ac",
+  track: "#2a3240",
 } as const;
 
 export const spacing = { xxs: 4, xs: 8, sm: 12, md: 16, lg: 20, xl: 24, xxl: 32 } as const;
@@ -45,5 +45,5 @@ export const type = {
 } as const;
 
 export const elevation = {
-  raised: { shadowColor: "#172033", shadowOpacity: 0.06, shadowRadius: 10, shadowOffset: { width: 0, height: 3 }, elevation: 2 } satisfies ViewStyle,
+  raised: { shadowColor: "#000000", shadowOpacity: 0.28, shadowRadius: 10, shadowOffset: { width: 0, height: 3 }, elevation: 2 } satisfies ViewStyle,
 } as const;
